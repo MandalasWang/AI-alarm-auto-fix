@@ -1,0 +1,129 @@
+# ============================================================================
+# AI-alarm_autoFix 配置示例
+# 复制为 config.yaml 后按环境修改；启动时通过环境变量 ALARM_CONFIG 指定路径，
+# 缺省读取工作目录下 config.yaml。
+# 敏感信息可用环境变量覆盖（优先级高于本文件）：
+#   ALARM_FEISHU_APP_ID / ALARM_FEISHU_APP_SECRET
+#   ALARM_GITLAB_TOKEN / ALARM_LLM_API_KEY / ALARM_EXTERNAL_API_KEY
+#   ALARM_REDIS_URL
+# 注意：所有配置键严格校验，写错键名启动即报错（防止配置静默失效）。
+# ============================================================================
+
+feishu:
+  enable: true                          # 总开关，false 时 receive 接口直接忽略告警
+  base_url: https://open.feishu.cn      # 飞书开放平台地址（私有化部署可换）
+  app_id: ""                            # 飞书应用 App ID（Java 版配在 Nacos xizhao-system-*.yaml）
+  app_secret: ""                        # 飞书应用 App Secret
+  default_chat_id: "oc_xxx"             # 默认告警接收群 chat_id
+  default_card_template_id: "AAqP6OIC5nvR3"   # 告警卡片模板 ID（模板变量见 README）
+  jump_url: ""                          # 卡片「修复」按钮跳转地址前缀，如 https://host/inner/feishu/alarm/callback/fix?traceId=
+  ignore_jump_url: ""                   # 卡片「忽略」按钮跳转地址前缀（callback/ignore?traceId=）；空则卡片不带 ignor_url 变量
+  callback_token: ""                    # 卡片交互回调校验 token；空则跳过校验（建议配置）
+  inner_auth_token: ""                  # /inner/* 接口自定义鉴权头（xizhao_request_auth）期望值；空则不校验（与 Java 网关白名单行为一致）
+  redis_key_ttl_hours: 24               # 分析结果缓存 TTL（小时）
+  env: test                             # 展示在卡片上的环境标识
+
+analyse:
+  enabled: true                         # 智能分析总开关（git 取码 + 查库 + LLM）
+
+  git:                                  # GitLab API v4（读码兜底通道；网关读码优先）
+    enabled: true
+    base_url: http://gitlab.example.cn
+    token: ""                           # Personal Access Token（read_api；自动建 MR/催办扫描需 api 权限，只读 token 时 MR 会 403 降级仅记日志）
+    default_branch: prod                # 分析取码分支（拉不到自动降级 master/main）
+    fix_base_branch: prod               # 修复基线分支（fix 分支从它拉出；固定稳定分支避免 test/UAT 并行冲突）
+    projects: {}                        # 服务名 → 项目数字ID或URL编码路径，如 ccd-java-system: "216"（MR 催办扫描也按此清单遍历）
+    max_snippets: 3                     # 单次告警最多取几个代码片段
+    context_lines: 15                   # 出错行上下各取多少行
+    timeout_ms: 10000
+    mr:                                 # 修复 MR 合拢：提交成功自动建 MR + 超时未合并催办
+      enabled: true
+      remove_source_branch: true        # MR 合并后自动删源分支
+      stale_hours: 48                   # fix_bug_* 分支超此时长未合并即催办
+      stale_remind_cron: "30 10 * * *"  # 催办扫描时间（北京时间 cron）；空串关闭催办
+      chat_ids: []                      # 催办群列表；空则回退 feishu.default_chat_id
+
+  llm:                                  # OpenAI 兼容 /chat/completions 协议
+    enabled: false
+    provider: deepseek                  # deepseek / openai / qwen / custom
+    base_url: ""                        # 缺省按 provider 取默认
+    api_key: ""
+    model: ""                           # 缺省按 provider 取默认（deepseek-chat / gpt-4o / qwen-plus）
+    chat_path: /v1/chat/completions     # 特殊网关可覆盖
+    timeout_ms: 60000
+    max_tokens: 2000                    # 思考型模型注意：思维链也计入，修复链路建议 32000
+    temperature: 0.2
+    max_retries: 2                      # 429/5xx/网络错误的重试次数（指数退避）
+
+  external:                             # 外挂 Agent 网关（优先调用，失败降级本地 LLM）
+    enabled: false
+    url: http://10.211.110.97:8787      # 网关地址（部署见 Java 仓库 docs/alarm-agent-gateway-deploy.md）
+    api_key: ""                         # 网关 .env 的 GATEWAY_TOKEN（Bearer）
+    workspace: ccd-java-system          # 默认工作区（网关服务器上预置的仓库名）
+    workspaces: {}                      # 告警服务名 → 工作区映射
+    poll_interval_ms: 5000
+    timeout_ms: 300000
+    code_read_enabled: true             # 读码走网关 GET /code/file，失败降级 GitLab API
+    fix_commit_enabled: true            # 修复提交走网关 POST /fix/commit，失败降级 GitLab API
+
+  db:                                   # 告警相关库上下文（只读）
+    enabled: false
+    sample_limit: 3
+    query_timeout_seconds: 5
+    nacos:                              # 按服务名从 Nacos 动态解析该服务的数据源
+      enabled: true
+      mode: direct-db                   # direct-db（直连 Nacos 配置库，推荐）/ open-api
+      config_db:                        # Nacos 配置库连接（库名 nacos，建议只读账号）
+        url: jdbc:mysql://10.211.110.112:3306/nacos?useSSL=false
+        username: ""
+        password: ""
+      server_addr: ""                   # open-api 模式用，如 10.211.110.112:8848
+      namespace: ""                     # 命名空间 = 目标服务的 spring.profiles.active，如 test
+      group: DEFAULT_GROUP
+      data_id_pattern: "{service}.yaml" # 多候选逗号分隔；未命中自动模糊搜兜底
+      common_data_ids: xizhao-common.yaml   # 公共配置（提供 ${conf.mysql.*} 占位符的值）
+      username: ""                      # Nacos 开启鉴权时才需要
+      password: ""
+      cache_minutes: 30
+      timeout_ms: 10000
+    datasources: {}                     # 静态兜底：数据源名 → {url, username, password}
+    service_datasources: {}             # 静态兜底：服务名 → 数据源名
+
+  fix_notify:
+    card_template_id: "AAqPVdOld0o00"   # 修复结果通知卡片模板；空则发文本消息兜底
+    manual_card_template_id: ""         # 人工处理/转人工通知卡片模板（DEPENDENCY/MANUAL_REQUIRED 时发送）；空则发文本兜底
+
+  repeat:                               # 重复告警/复发识别（按告警指纹判定）
+    window_hours: 24                    # 指纹匹配回溯窗口（小时）；0 或负数关闭重复识别
+
+  fix_validation:                       # 修复质量闸：提交前校验修复文件，不过转 FAILED 可重试
+    enabled: true                       # 总开关；false 时生成了就直接提交（不建议）
+    llm_self_check: true                # 第二遍 LLM 自检 diff 是否有编译级错误（多花一次 LLM 调用）
+
+  daily_report:                         # 告警日报（替代 Java 版 xxl-job，本服务自带调度）
+    enabled: true
+    cron: "40 9 * * *"                  # 每天 09:40（分钟级 cron，北京时间）
+    chat_ids: []                        # 推送群列表；空则回退 feishu.default_chat_id
+    card_template_id: "AAqTsvflVLL8E"   # 日报卡片模板（变量 content）；空则发文本
+    bot_name: 归口业务小助手
+    bot_join_time: ""                   # 页脚「入群」时间，空则不展示
+    data_source_name: 归口业务告警群
+    insights_llm_enabled: true          # 关键洞察用 LLM 生成，失败降级规则洞察
+    insight_max_items: 4
+
+storage:
+  redis_url: ""                         # Redis 连接，如 redis://:pwd@127.0.0.1:6379/0；空则退化为进程内锁/缓存（仅单实例可用）
+  key_prefix: ""                        # 锁与缓存 key 前缀；空则用与 Java 版一致的默认值
+  database:                             # alarm_analyze_result 所在业务库（独立部署必须配置，否则回调修复/日报不可用）
+    url: jdbc:mysql://127.0.0.1:3306/ccd_system?useSSL=false&serverTimezone=Asia/Shanghai
+    username: ""
+    password: ""
+
+executor:
+  workers: 4                            # 分析/修复线程池上限（Java 版 core 2 / max 4）
+  queue_size: 100                       # 队列上限；满时退化为调用线程执行（不丢任务）
+
+server:
+  host: 0.0.0.0
+  port: 8800
+  log_level: INFO                       # DEBUG / INFO / WARNING / ERROR

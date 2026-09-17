@@ -1,0 +1,11 @@
+{
+  "source": "ccd-system",
+  "level": "ERROR",
+  "title": "数据库查询异常",
+  "requestUri": "/inner/feishu/alarm/receive",
+  "message": "### Error querying database.  Cause: java.sql.SQLSyntaxErrorException: Table 'ccd-system.alarm_analyze_result' doesn't exist\n### The error may exist in com/xizhao/db/mapper/sys/AlarmAnalyzeResultMapper.java",
+  "stackTrace": "java.sql.SQLSyntaxErrorException: Table 'ccd-system.alarm_analyze_result' doesn't exist\n\tat com.xizhao.service.feishu.alarm.impl.AlarmAnalyseServiceImpl.handleAlarm(AlarmAnalyseServiceImpl.java:77)\n\tat com.xizhao.controller.feishu.FeishuAlarmController.receive(FeishuAlarmController.java:109)\n\tat org.springframework.web.method.HandlerMethod.invoke(HandlerMethod.java:100)",
+  "traceId": "pye2e-20260917-1116",
+  "time": "2026-09-17 11:08:30",
+  "businessKeys": {"uri": "/inner/feishu/alarm/receive", "params": "{\"traceId\":\"pye2e-20260917-1116\"}"}
+}

@@ -577,6 +577,62 @@ def build_dashboard_router(container: Container) -> APIRouter:
             log.exception("看板系统分类查询失败")
             return _fail(f"看板数据查询失败: {exc}")
 
+    # ------------------------------------------------------------------ 处理操作（写，走同一鉴权）
+    #
+    # 处理动线闭环：看板发现 FAILED/待人工后无需回群点卡片，直接重试/忽略/结案。
+    # 复用 FixService 的全部防重与锁语义（与卡片按钮同一入口），结果文案在 message 字段。
+
+    def _record_or_fail(record_id: int) -> tuple["AlarmAnalyzeRecord | None", dict | None]:
+        blocked = _require_repo()
+        if blocked:
+            return None, blocked
+        try:
+            record = container.repository.get_by_id(record_id)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("看板告警记录查询失败, id=%s", record_id)
+            return None, _fail(f"看板数据查询失败: {exc}")
+        if record is None:
+            return None, _fail(f"未找到告警记录 id={record_id}")
+        return record, None
+
+    @router.post("/api/dashboard/alarms/{record_id}/retry",
+                 summary="发起自动修复（与卡片「修复」按钮同一入口与防重语义）",
+                 dependencies=[Depends(basic_auth_guard)])
+    def alarm_retry(record_id: int) -> dict:
+        record, blocked = _record_or_fail(record_id)
+        if blocked:
+            return blocked
+        acceptance = container.fix_service.try_accept(record.trace_id)
+        if not acceptance.accepted:
+            return {"code": 500, "message": acceptance.message, "data": None}
+        result, rid = acceptance.result, acceptance.record_id
+
+        def _fix() -> None:
+            container.fix_service.execute_fix(record.trace_id, result, rid)
+
+        container.executor.run_or_inline(_fix)  # 修复低频且有锁状态，池满保持 inline 不丢
+        return {"code": 0, "message": acceptance.message, "data": True}
+
+    @router.post("/api/dashboard/alarms/{record_id}/ignore",
+                 summary="忽略告警（人工判定无需修复，与卡片「忽略」按钮同一入口）",
+                 dependencies=[Depends(basic_auth_guard)])
+    def alarm_ignore(record_id: int) -> dict:
+        record, blocked = _record_or_fail(record_id)
+        if blocked:
+            return blocked
+        ok, message = container.fix_service.try_ignore(record.trace_id)
+        return {"code": 0 if ok else 500, "message": message, "data": ok}
+
+    @router.post("/api/dashboard/alarms/{record_id}/resolve",
+                 summary="人工结案（问题已人工解决，与卡片「已解决」按钮同一入口）",
+                 dependencies=[Depends(basic_auth_guard)])
+    def alarm_resolve(record_id: int, note: str = "") -> dict:
+        record, blocked = _record_or_fail(record_id)
+        if blocked:
+            return blocked
+        ok, message = container.fix_service.try_resolve(record.trace_id, note)
+        return {"code": 0 if ok else 500, "message": message, "data": ok}
+
     return router
 
 

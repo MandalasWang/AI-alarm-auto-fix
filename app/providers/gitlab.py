@@ -44,6 +44,15 @@ class GitLabClient:
 
     # ------------------------------------------------------------------ 读
 
+    def ping(self) -> bool:
+        """连通性+凭证检查（doctor/预检用）：GET /api/v4/version 返回 200 即通过。"""
+        try:
+            response = self._http.fetch("GET", f"{self._base_url}/api/v4/version",
+                                        headers=self._headers(), timeout_ms=self._timeout_ms)
+        except Exception:  # noqa: BLE001 - 探活只报告不抛
+            return False
+        return response.status_code == 200
+
     def search_project(self, keyword: str) -> str | None:
         """项目搜索，返回第一个匹配项目的 ID（字符串），找不到返回 None。"""
         try:

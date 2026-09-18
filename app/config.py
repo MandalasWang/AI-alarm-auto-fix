@@ -274,6 +274,11 @@ class StorageConfig(StrictModel):
     redis_url: str = ""
     key_prefix: str = ""
     database: DatabaseStoreConfig = Field(default_factory=DatabaseStoreConfig)
+    # 数据保留期（天）：0=不清理（默认，与 Java 版共用表时保持谨慎）；>0 时按 retention_cron
+    # 每天分批删除更早的告警记录（含 analyze_content 大字段，防表无限膨胀）。
+    # 注意：与 Java 版共用表时启用会同时删除 Java 版的数据，共用期请保持 0 或两边协商
+    retention_days: int = 0
+    retention_cron: str = "10 3 * * *"  # 清理执行时间（北京时间 cron），retention_days>0 时生效
 
 
 class ExecutorConfig(StrictModel):

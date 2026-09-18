@@ -95,6 +95,26 @@ class AlarmRepository:
                      self._clip(detail, 500), self._clip(source_ip, 50)),
                 )
 
+    def purge_before(self, cutoff: datetime, batch_size: int = 500,
+                     max_batches: int = 200) -> int:
+        """分批删除 cutoff 之前创建的告警记录（保留期清理用），返回删除总行数。
+
+        单批 LIMIT 防长事务锁表；max_batches 兜底单轮上限（量大时次日继续）。
+        注意：root_id 只存 id 不设外键，删除根记录后新告警的 root_id 变为悬空引用（仅展示）。
+        """
+        deleted = 0
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                for _ in range(max(max_batches, 1)):
+                    affected = cursor.execute(
+                        "DELETE FROM alarm_analyze_result WHERE create_time < %s LIMIT %s",
+                        (cutoff, max(1, batch_size)),
+                    )
+                    deleted += affected
+                    if affected < max(1, batch_size):
+                        break
+        return deleted
+
     # ------------------------------------------------------------------ 读
 
     def latest_by_trace_id(self, trace_id: str) -> AlarmAnalyzeRecord | None:

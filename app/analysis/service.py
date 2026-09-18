@@ -131,7 +131,8 @@ class AlarmAnalyseService:
         # 8. 构建卡片并发送
         card = build_alarm_card(result, template_id, self._config.feishu.jump_url,
                                 self._config.feishu.ignore_jump_url,
-                                self._config.feishu.resolve_jump_url)
+                                self._config.feishu.resolve_jump_url,
+                                self._config.analyse.dashboard.detail_url or "")
         log.info("推送飞书告警卡片, service=%s, level=%s, chatId=%s",
                  result.service, result.level, chat_id)
         message_id = self._feishu.send_card_to_chat(chat_id, card)

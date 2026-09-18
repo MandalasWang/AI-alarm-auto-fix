@@ -46,13 +46,14 @@ def _card_text(value: str | None, max_bytes: int, default: str | None) -> str:
 
 
 def build_alarm_card(result: AlarmAnalyseResult, template_id: str, jump_url: str,
-                     ignore_jump_url: str = "", resolve_jump_url: str = "") -> dict:
+                     ignore_jump_url: str = "", resolve_jump_url: str = "",
+                     detail_url: str = "") -> dict:
     """构建告警模板卡片。
 
-    url/ignor_url/resolve_url 变量为分端差异化链接对象（模板 Url 类型），传字符串会报 200732
-    类型不一致；非 http 开头的完整链接会被飞书拒绝（200737），jump_url 未配置时保持空串交由
-    模板兜底；ignore/resolve_jump_url 未配置时不输出对应变量（模板可不加按钮），旧模板未引用
-    的变量自动忽略。
+    url/ignor_url/resolve_url/detail_url 变量为分端差异化链接对象（模板 Url 类型），传字符串
+    会报 200732 类型不一致；非 http 开头的完整链接会被飞书拒绝（200737），jump_url 未配置时
+    保持空串交由模板兜底；其余链接未配置时不输出对应变量（模板可不加按钮），旧模板未引用
+    的变量自动忽略。detail_url 指向 Web 看板详情（完整分析不受 30KB 卡片截断限制）。
     """
     variables: dict = {
         "title": _card_text(result.title, _SHORT_FIELD_MAX_BYTES, "系统告警"),
@@ -84,6 +85,10 @@ def build_alarm_card(result: AlarmAnalyseResult, template_id: str, jump_url: str
     if resolve_jump_url:
         resolve_url = resolve_jump_url + (result.trace_id or "")
         variables["resolve_url"] = {"url": resolve_url, "pc_url": resolve_url}
+
+    # 看板详情链接：配置 detail_url 后输出（卡片 30KB 截断，完整分析/上下文在 Web 看板）
+    if detail_url:
+        variables["detail_url"] = {"url": detail_url, "pc_url": detail_url}
 
     # 归因/复发标注：repeat_label 仅复发时输出（重复告警不推卡片）
     variables["problem_type"] = _card_text(problem_type_label(result.problem_type),

@@ -131,6 +131,11 @@
            vertical-align: top; }
   th { color: var(--text2); font-weight: 500; white-space: nowrap; background: rgba(26, 35, 54, .8); }
   tbody tr:hover { background: rgba(91, 140, 255, .07); cursor: pointer; }
+  .act-btn { padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 13px;
+    border: 1px solid var(--border2); background: var(--panel2); color: var(--text); }
+  .act-btn:hover { border-color: var(--blue); color: var(--blue); }
+  .act-btn.primary { border-color: rgba(52, 211, 153, .5); color: #34d399; }
+  .act-btn.primary:hover { background: rgba(52, 211, 153, .1); }
   td.wrap { max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .badge { display: inline-block; border-radius: 4px; padding: 0 8px; font-size: 12px;
            line-height: 20px; white-space: nowrap; border: 1px solid transparent; }
@@ -705,6 +710,7 @@ async function openDetail(id) {
     <div>${fixBadge({ fix_status: d.fix_status, fix_label: d.fix_label })}
       ${d.repeat_type && d.repeat_type !== "NORMAL"
         ? ` ${repeatBadge(d.repeat_type)}` : ""}</div>
+    ${actionBar(d)}
     <div class="kv-grid">
       ${kv("服务", esc(d.service || "-"))}
       ${kv("系统分类", esc(d.system_type || "-"))}
@@ -731,6 +737,38 @@ async function openDetail(id) {
     <details><summary>请求参数</summary>${preBlock(a.requestParam)}</details>
     <details><summary>原始 JSON</summary>${preBlock(JSON.stringify(a, null, 2))}</details>`;
   $("#btn-close").addEventListener("click", closeModal);
+  m.querySelectorAll(".act-btn").forEach((b) =>
+    b.addEventListener("click", () => alarmAction(d.id, b.dataset.act)));
+}
+
+/* ---------------- 处理操作（重试 / 忽略 / 结案，写接口走同一 Basic 鉴权） ---------------- */
+
+const DONE_STATUSES = ["FIXED", "NOT_NEEDED", "MANUAL_RESOLVED"];
+
+function actionBar(d) {
+  if (DONE_STATUSES.includes(d.fix_status)) return "";
+  const btns = [];
+  if (d.fix_status === "FAILED") btns.push(`<button class="act-btn" data-act="retry">重试修复</button>`);
+  btns.push(`<button class="act-btn" data-act="ignore">忽略</button>`);
+  btns.push(`<button class="act-btn primary" data-act="resolve">人工已解决</button>`);
+  return `<div style="margin-top:10px">${btns.join(" ")}
+    <span class="small muted" id="act-msg"></span></div>`;
+}
+
+async function alarmAction(id, act) {
+  if (act === "ignore" && !confirm("确认忽略该告警（判定无需处理，此后不可再修复）？")) return;
+  const msg = $("#act-msg");
+  if (msg) msg.textContent = "提交中…";
+  try {
+    const res = await fetch(`/api/dashboard/alarms/${id}/${act}`, { method: "POST" });
+    const body = await res.json();
+    if (body.code !== 0) throw new Error(body.message || "操作失败");
+    if (msg) msg.textContent = body.message || "已受理";
+    if (act === "retry") setTimeout(() => { closeModal(); reload(); }, 600);
+    else { closeModal(); loadList(); loadOverview(); }
+  } catch (err) {
+    if (msg) msg.textContent = err.message;
+  }
 }
 
 function closeModal() {

@@ -65,6 +65,13 @@ class FeishuClient:
 
     # ------------------------------------------------------------------ 协议实现
 
+    def ping(self) -> bool:
+        """凭证可用性检查（doctor/预检用）：能取到 tenant_access_token 即通过，不发送任何消息。"""
+        try:
+            return bool(self._token())
+        except Exception:  # noqa: BLE001 - 探活只报告不抛
+            return False
+
     def _send(self, chat_id: str, msg_type: str, content: str) -> dict:
         try:
             response = self._http.fetch(

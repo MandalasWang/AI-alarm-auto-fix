@@ -54,6 +54,15 @@ class AgentGatewayClient:
     def commit_available(self) -> bool:
         return self._config.fix_commit_enabled and self._config.configured
 
+    def fetch_root(self):
+        """可达性探测（doctor/预检用）：GET 网关根路径，返回原始响应（任何 HTTP 状态都算可达）。
+
+        网关未定义根路由时通常返回 404——连接层通即可；连接失败抛 UpstreamError 由调用方处理。
+        """
+        return self._http.fetch("GET", self._config.url.rstrip("/") + "/",
+                                headers={"Authorization": f"Bearer {self._config.api_key}"},
+                                timeout_ms=self._code_read_timeout_ms)
+
     # ------------------------------------------------------------------ 读码
 
     def fetch_file(self, service: str, file_path: str, ref: str) -> str | None:

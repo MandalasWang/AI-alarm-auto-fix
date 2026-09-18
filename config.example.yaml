@@ -123,6 +123,8 @@ analyse:
 storage:
   redis_url: ""                         # Redis 连接，如 redis://:pwd@127.0.0.1:6379/0；空则退化为进程内锁/缓存（仅单实例可用）
   key_prefix: ""                        # 锁与缓存 key 前缀；空则用与 Java 版一致的默认值
+  retention_days: 0                     # 告警记录保留天数；0=不清理。>0 时每天按 retention_cron 分批删除超期记录（与 Java 版共用表时启用会连 Java 版数据一起删，共用期保持 0）
+  retention_cron: "10 3 * * *"          # 保留期清理执行时间（北京时间 cron），retention_days>0 时生效
   database:                             # alarm_analyze_result 所在业务库（独立部署必须配置，否则回调修复/日报不可用）
     url: jdbc:mysql://127.0.0.1:3306/ccd_system?useSSL=false&serverTimezone=Asia/Shanghai
     username: ""

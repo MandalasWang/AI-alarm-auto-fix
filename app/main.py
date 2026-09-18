@@ -61,9 +61,12 @@ def _start_scheduler(container: Container):
 
     - 日报：daily_report.enabled 开启；
     - 修复分支催办：git.mr.enabled 且 stale_remind_cron 非空；
-    - 转人工催办：fix_notify.stale_remind_cron 非空。
+    - 转人工催办：fix_notify.stale_remind_cron 非空；
+    - 保留期清理：storage.retention_days > 0（每天分批删除超期告警记录）。
     全部未启用则不启动调度线程。
     """
+    from datetime import datetime, timedelta
+
     from apscheduler.schedulers.background import BackgroundScheduler
     from apscheduler.triggers.cron import CronTrigger
 
@@ -78,6 +81,18 @@ def _start_scheduler(container: Container):
     if analyse.fix_notify.stale_remind_cron.strip():
         jobs.append(("alarmManualStaleRemind", analyse.fix_notify.stale_remind_cron,
                      container.fix_service.remind_stale_manual))
+
+    storage = container.config.storage
+    if storage.retention_days > 0:
+        def _purge() -> None:
+            if container.repository is None:
+                return
+            cutoff = datetime.now() - timedelta(days=storage.retention_days)
+            deleted = container.repository.purge_before(cutoff)
+            if deleted:
+                log.info("保留期清理完成: 删除 %s 条 %s 天前记录", deleted, storage.retention_days)
+
+        jobs.append(("alarmRetentionCleanup", storage.retention_cron, _purge))
     if not jobs:
         return None
 

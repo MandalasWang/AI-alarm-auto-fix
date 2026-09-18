@@ -44,6 +44,7 @@
 | 卡片交互 | 卡片 confirm/ignore 按钮回调路由 | 飞书服务器 POST |
 | 告警日报 | 昨日/本周/本月统计 + LLM 关键洞察，推多群 | 内置调度每天 09:40（北京时间） |
 | Web 告警看板 | 浏览器查看 KPI（是否解决/是否合并）、问题数折线图、明细与处理详情 | 打开 `http://host:8800/dashboard`（只读，可选 Basic 认证） |
+| 看板统计推送 | 飞书卡片推送周/月告警统计 + 日/周趋势折线图 + 月告警分析 | `GET /inner/feishu/alarm/dashboard/report`（每自然日一次幂等） |
 
 总架构（虚线为可降级通道）：
 
@@ -208,18 +209,21 @@ token 校验（配了 `feishu.callback_token` 才校验）→ 解析按钮 value
 按 messageId 从 Redis 取分析结果 → confirm/ignore 路由（confirm 为扩展点，真实修复走 2.2 的跳转链接），
 响应飞书 toast。
 
-### 2.4 链路四：告警日报
+### 2.4 链路四：告警日报与看板统计推送
 
-`app/reporting/daily_report.py`，APScheduler 每天 09:40（北京时间，cron 可配）触发：
+**告警日报**（`app/reporting/daily_report.py`，APScheduler 每天 09:40 北京时间，cron 可配）：
+只统计**昨日**，首行 告警/修复通知/成功/失败/成功率，次行仅展示非零的重复/复发/无需修复/转人工/待人工段。
 
-- **统计**：查 `alarm_analyze_result` 按创建时间分三个区间（昨日/本周[ISO 周一起]/本月）。
-- **口径**（看板语义，勿改）：`修复成功率 = 成功 / (错误告警 − 无需处理 − 转人工 − 待人工 − 重复)`，
+**看板统计推送**（`app/reporting/dashboard_report.py`，`GET /inner/feishu/alarm/dashboard/report`
+按需触发）：统计**本周/本月**两期数据，附**日（近 30 天）/周（近 12 周）告警趋势折线图**（飞书模板
+图表组件，VChart spec 变量 `day_chart`/`week_chart` 下发）与**月告警分析**（`annaly`，LLM 生成、
+失败降级规则洞察）。卡片「查看详情」按钮指向本接口、可被反复点击 → **每自然日仅放行一次推送**
+（Redis 按日期幂等，推送失败释放锁允许当日重试）。
+
+- **共用口径**（`app/reporting/stats.py`，日报/看板一致，勿改）：`修复成功率 = 成功 / (错误告警 − 无需处理 − 转人工 − 待人工 − 重复)`，
   非自动修复项剔除出分母（重复剔除防刷屏告警稀释成功率）；分母为 0 且有告警记 100%、无告警记 0% 不展示；
-  本期无告警只展示「🔴 错误告警 0 条」；本月最早告警晚于月初时追加「从 MM-dd 起算」。
-  重复/复发按 `repeat_type` 单独计数展示（次行仅非零段）。
-- **关键洞察**：LLM 生成（统计概览+逐条明细喂给模型，引用告警短编号）→ 失败降级规则洞察
-  （服务集中度 ≥2 条 + 未闭环编号列表）。
-- **推送**：`daily_report.chat_ids` 多群，卡片模板（变量 `content`）优先，未配置/模板不可见自动文本兜底；
+  本期无告警只展示「🔴 错误告警 0 条」；重复/复发按 `repeat_type` 单独计数。
+- **推送**：`daily_report.chat_ids` 多群，卡片模板优先，未配置/模板不可见自动文本兜底；
   单群失败不阻断其他群。
 
 ### 2.5 并发与锁汇总
@@ -404,7 +408,9 @@ curl -X POST http://127.0.0.1:8800/inner/feishu/alarm/receive \
 | `repeat` | `window_hours` | 指纹重复/复发识别回溯窗口（小时），默认 24；0 或负数关闭 |
 | `daily_report` | `cron` | 分钟级 cron（北京时间），默认 `40 9 * * *` |
 | | `chat_ids` / `card_template_id` | 推送群列表 / 日报模板（变量 content）；模板不可见时自动文本兜底 |
-| | `insights_llm_enabled` / `insight_max_items` | LLM 洞察开关 / 最多条数 |
+| | `insights_llm_enabled` / `insight_max_items` | 月告警分析（告警看板 `annaly` 变量）LLM 开关 / 最多条数 |
+| `dashboard` | `card_template_id` | 看板推送模板（需含 day_chart/week_chart 图表组件与 annaly 变量）；空则回退日报模板 |
+| | `detail_url` | 详情链接（detail_url 变量，日报/看板卡「查看详情」共用，跳 Web 看板）；空则不下发 |
 
 ### dashboard（Web 告警看板）
 
@@ -443,6 +449,7 @@ curl -X POST http://127.0.0.1:8800/inner/feishu/alarm/receive \
   "stackTrace": "java.sql.SQLSyntaxErrorException: ...\n\tat com.xizhao....",
   "traceId": "ccd-design-project-5290",
   "time": "2026-09-17 11:08:30",
+  "systemType": "ccd",
   "businessKeys": {"uri": "/api/xxx", "params": "{\"id\":1}"},
   "chatId": "", "templateId": ""
 }
@@ -493,10 +500,11 @@ LLM/外挂网关按设计允许运行期降级，不作为就绪条件。
 | 端点 | 说明 |
 | --- | --- |
 | `GET /dashboard` | 看板单页，**总览 / 告警明细** 两个标签页分区布局（原生 JS 自绘 SVG 图表，无 CDN/构建链） |
-| `GET /api/dashboard/overview?days=14&service=` | KPI（总数/已解决+解决率/未处理/修复失败/待人工/无需处理/已合并+合并率）+ 状态与归因分布（含占比）+ 每日新增/修复折线 + **近 12 周对比柱图** + **服务问题点 TOP10**（堆叠条：已解决/未处理/失败） |
-| `GET /api/dashboard/alarms?page=&size=&days=&service=&status=&q=` | 分页明细（页面默认每页 10 条、查近 30 天；FIXED 记录带合并状态徽标） |
+| `GET /api/dashboard/overview?days=14&service=&system=` | KPI（问题数/修复数/窗口与当日修复率/待处理分布）+ 状态环形图与归因/重复分布（含占比）+ 每日（近30天）新增/修复/重复三折线 + 按周（近12周）+ **服务问题点 TOP10** |
+| `GET /api/dashboard/alarms?page=&size=&days=&service=&status=&q=&system=` | 分页明细（页面默认每页 10 条、查近 30 天；FIXED 记录带合并状态徽标） |
 | `GET /api/dashboard/alarms/{id}` | 详情：完整分析内容 + 处理情况（fix_summary/合并状态/链接） |
-| `GET /api/dashboard/services` | 服务名筛选项 |
+| `GET /api/dashboard/services?system=` | 服务名筛选项（可按系统分类过滤） |
+| `GET /api/dashboard/systems` | 系统分类列表；**库里存在 >1 个分类时前端显示「按系统切换」**，否则隐藏、仅按服务筛选（system_type 为空的历史数据兼容） |
 
 **「是否合并」判定**（以 GitLab 为准，进程内缓存 `merge_cache_seconds`）：
 
@@ -512,6 +520,15 @@ LLM/外挂网关按设计允许运行期降级，不作为就绪条件。
 业务库未配置时 API 返回 code=500 与明确文案，页面本身仍可访问。
 合并扫描每轮最多查最近 50 条已修复记录（超出在 KPI 副标题标注），首屏后走缓存。
 
+### 6.9 GET /inner/feishu/alarm/dashboard/report —— 告警看板统计推送
+
+按需触发飞书「告警看板」卡片：本周/本月统计 + 日（近 30 天）/周（近 12 周）告警趋势折线图
+（模板图表组件，VChart spec 变量 `day_chart`/`week_chart`）+ 月告警分析（`annaly` 变量，LLM 生成、
+失败降级规则洞察）。异步执行、受理即返回；**每自然日仅推送一次**（Redis 按日期幂等，推送失败
+释放锁允许当日重试），重复触发返回 `data=false` 与提示。模板用 `analyse.dashboard.card_template_id`
+（空则回退日报模板，无图表组件时图表变量被忽略只渲染文本）；`analyse.dashboard.detail_url` 配置后
+卡片带「查看详情」按钮跳 Web 看板。统计口径与日报完全共用（`app/reporting/stats.py`）。
+
 ---
 
 ## 7. 数据与存储
@@ -520,8 +537,9 @@ LLM/外挂网关按设计允许运行期降级，不作为就绪条件。
 
 | 列 | 说明 |
 | --- | --- |
-| id / trace_id / service_name / `interface` / create_time / update_time | 基础字段（`interface` 是列名，SQL 中需反引号） |
-| analyze_content | 完整分析结果 JSON（键 camelCase，与 Java 互操作） |
+| id / trace_id / service_name / `interface` / create_time / update_time | 基础字段（`interface` 是列名，SQL 中需反引号；trace_id VARCHAR(255) NOT NULL，create_time NOT NULL，update_time TIMESTAMP） |
+| analyze_content | **JSON 类型**，完整分析结果（键 camelCase，与 Java 互操作） |
+| system_type | 系统分类（如 `ccd`-归口系统；NULL=未分类）；看板「按系统切换」筛选项 |
 | fix_status | `FIXED` / `NOT_NEEDED` / `FAILED` / `HANDOVER` / `MANUAL_PENDING` / `NULL`(未发起) |
 | fix_summary | commit message 原文+shortId+链接、人工操作步骤或忽略标记（应用层截 1000 字符） |
 | fix_time | 修复结果时间 |
@@ -530,7 +548,10 @@ LLM/外挂网关按设计允许运行期降级，不作为就绪条件。
 | repeat_type | `NORMAL` / `REPEATED`(重复压卡片) / `RECURRED`(修复后复发) |
 | root_id | 首次出现记录 id（REPEATED/RECURRED 指向根告警） |
 
-`analyze_content` JSON 字段：`service, env, level, title, coreMessage, exceptionClass, tables,
+索引：`idx_fingerprint_time (fingerprint, create_time)`、`idx_trace_id_create_time (trace_id, create_time DESC)`。
+建表与旧表迁移语句见 `sql/schema.sql`（迁移含 trace_id 回填、analyze_content 转 JSON、system_type 补列）。
+
+`analyze_content` JSON 字段：`service, env, systemType, level, title, coreMessage, exceptionClass, tables,
 codeContext, stackTrace, dbContext, analysis, proposal, traceId, time, rawMessage, requestUri,
 requestParam, url, problemType, fingerprint, repeatType, rootId`（空值省略）。
 

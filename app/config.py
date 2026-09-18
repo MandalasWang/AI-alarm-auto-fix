@@ -30,6 +30,7 @@ _ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
     "ALARM_EXTERNAL_API_KEY": ("analyse", "external", "api_key"),
     "ALARM_REDIS_URL": ("storage", "redis_url"),
     "ALARM_DB_PASSWORD": ("storage", "database", "password"),
+    "ALARM_DASHBOARD_PASSWORD": ("dashboard", "password"),
 }
 
 
@@ -230,6 +231,17 @@ class DailyReportConfig(StrictModel):
     insight_max_items: int = 4
 
 
+class DashboardConfig(StrictModel):
+    """告警看板配置（HTTP 接口按需触发：GET /inner/feishu/alarm/dashboard/report）。"""
+
+    # 看板卡片模板 ID（模板变量：content 文本 + day_chart/week_chart 图表变量 + annaly 月告警分析）；
+    # 空则回退日报模板（daily_report.card_template_id，其无图表组件，图表变量被忽略只渲染文本）
+    card_template_id: str = ""
+    # 详情链接（模板 Url 类型变量 detail_url，日报/看板卡片「查看详情」按钮共用，配日/周趋势看板地址）；
+    # 空则卡片不下发该变量
+    detail_url: str = ""
+
+
 class AnalyseConfig(StrictModel):
     enabled: bool = True
     git: GitConfig = Field(default_factory=GitConfig)
@@ -238,6 +250,7 @@ class AnalyseConfig(StrictModel):
     db: DbConfig = Field(default_factory=DbConfig)
     fix_notify: FixNotifyConfig = Field(default_factory=FixNotifyConfig)
     daily_report: DailyReportConfig = Field(default_factory=DailyReportConfig)
+    dashboard: DashboardConfig = Field(default_factory=DashboardConfig)
     repeat: RepeatConfig = Field(default_factory=RepeatConfig)
     fix_validation: FixValidationConfig = Field(default_factory=FixValidationConfig)
 
@@ -263,12 +276,22 @@ class ServerConfig(StrictModel):
     log_level: str = "INFO"
 
 
+class DashboardConfig(StrictModel):
+    """Web 告警看板（/dashboard）：只读展示告警处理情况/指标/趋势 + 可选 Basic 认证。"""
+
+    enabled: bool = True
+    username: str = ""                    # Basic 认证用户名；与 password 同时非空才启用鉴权
+    password: str = ""                    # Basic 认证密码（可用环境变量 ALARM_DASHBOARD_PASSWORD 覆盖）
+    merge_cache_seconds: int = 300        # 「是否合并」GitLab 查询结果的进程内缓存秒数
+
+
 class AppConfig(StrictModel):
     feishu: FeishuConfig = Field(default_factory=FeishuConfig)
     analyse: AnalyseConfig = Field(default_factory=AnalyseConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
     executor: ExecutorConfig = Field(default_factory=ExecutorConfig)
     server: ServerConfig = Field(default_factory=ServerConfig)
+    dashboard: DashboardConfig = Field(default_factory=DashboardConfig)
 
 
 # ---- 与 Java 版一致的默认 key（storage.key_prefix 为空时启用，保证 Redis 数据互通）----

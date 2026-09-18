@@ -1,0 +1,849 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>告警看板 · AI-alarm_autoFix</title>
+<style>
+  /* 深色监控大屏主题（参考 Grafana/主流大屏规范：深色打底、弱化非数据元素、语义色板） */
+  :root {
+    --bg: #0d1322; --panel: #151c2c; --panel2: #1a2336;
+    --border: #24304a; --border2: #2e3c5c;
+    --text: #e6eaf3; --text2: #9aa5bd; --muted: #6b7690;
+    --blue: #5b8cff; --green: #34d399; --red: #f87171; --orange: #fbbf24;
+    --purple: #a78bfa; --slate: #7e8aa8;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; color: var(--text);
+         font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+         background: var(--bg);
+         background-image: radial-gradient(1100px 320px at 50% -80px, rgba(91, 140, 255, .16), transparent),
+                           linear-gradient(180deg, #0d1322 0%, #0e1426 100%);
+         background-attachment: fixed; }
+  a { color: var(--blue); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code { background: #1e2740; border-radius: 4px; padding: 1px 6px; font-size: 12px; }
+
+  header { position: sticky; top: 0; z-index: 10; background: rgba(17, 24, 40, .92);
+           backdrop-filter: blur(6px); border-bottom: 1px solid var(--border);
+           padding: 10px 20px 0; }
+  .head-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  header h1 { font-size: 17px; margin: 0; letter-spacing: .5px; }
+  header h1::before { content: ""; display: inline-block; width: 8px; height: 18px;
+                      border-radius: 2px; margin-right: 8px; vertical-align: -3px;
+                      background: linear-gradient(180deg, var(--blue), var(--purple)); }
+  .env-badge { background: rgba(91, 140, 255, .14); color: #8fb0ff; border: 1px solid rgba(91, 140, 255, .3);
+               border-radius: 4px; padding: 1px 8px; font-size: 12px; font-weight: 600; }
+  .controls { margin-left: auto; display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+              padding-bottom: 10px; }
+  select, input[type=search] { border: 1px solid var(--border2); border-radius: 6px;
+        padding: 5px 8px; background: var(--panel2); color: var(--text); font-size: 13px; }
+  input[type=search] { width: 190px; }
+  input[type=search]::placeholder { color: var(--muted); }
+  button { border: 1px solid var(--border2); background: var(--panel2); border-radius: 6px;
+           padding: 5px 14px; cursor: pointer; font-size: 13px; color: var(--text);
+           transition: border-color .15s, color .15s; }
+  button:hover { border-color: var(--blue); color: var(--blue); }
+  button:disabled { opacity: .45; cursor: default; }
+  label.auto { color: var(--text2); font-size: 13px; user-select: none; cursor: pointer; }
+
+  .tabs { display: flex; gap: 4px; }
+  .tab-btn { border: none; background: none; padding: 8px 16px; font-size: 14px;
+             color: var(--text2); border-bottom: 2px solid transparent; border-radius: 0; }
+  .tab-btn.active { color: var(--blue); font-weight: 600; border-bottom-color: var(--blue); }
+
+  main { padding: 16px 20px 40px; max-width: 1400px; margin: 0 auto; }
+  .banner { display: none; background: rgba(248, 113, 113, .1); color: var(--red);
+            border: 1px solid rgba(248, 113, 113, .35); border-radius: 8px;
+            padding: 10px 14px; margin-bottom: 14px; }
+  .muted { color: var(--text2); }
+  .small { font-size: 12px; }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+  .strip { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
+  .strip .label { color: var(--text2); font-size: 13px; }
+  .section-title { font-size: 13px; font-weight: 600; color: var(--text2); display: flex;
+                   align-items: center; gap: 6px; margin: 0 0 10px; }
+  .section-title::before { content: ""; width: 3px; height: 13px; border-radius: 2px;
+                           background: linear-gradient(180deg, var(--blue), var(--purple)); }
+  .section-sub { font-size: 12px; font-weight: 600; color: var(--text2); margin: 14px 0 2px; }
+  .seg { display: inline-flex; }
+  .seg-btn { padding: 2px 10px; font-size: 12px; border-radius: 0; }
+  .seg-btn:first-child { border-radius: 6px 0 0 6px; }
+  .seg-btn:last-child { border-radius: 0 6px 6px 0; border-left: none; }
+  .seg-btn.active { background: rgba(91, 140, 255, .16); color: var(--blue); border-color: var(--blue); }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+           gap: 12px; margin-bottom: 14px; }
+  .card { background: linear-gradient(160deg, var(--panel2), var(--panel));
+          border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px;
+          transition: transform .15s, border-color .15s; }
+  .card:hover { transform: translateY(-1px); border-color: var(--border2); }
+  .card .num { font-size: 26px; font-weight: 700; line-height: 1.25;
+               font-variant-numeric: tabular-nums; }
+  .card .name { color: var(--text2); font-size: 13px; }
+  .card .sub { color: var(--muted); font-size: 12px; margin-top: 2px;
+               white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .card.c-green { border-left: 3px solid var(--green); }
+  .card.c-green .num { color: var(--green); }
+  .card.c-red { border-left: 3px solid var(--red); }
+  .card.c-red .num { color: var(--red); }
+  .card.c-orange { border-left: 3px solid var(--orange); }
+  .card.c-orange .num { color: var(--orange); }
+  .card.c-blue { border-left: 3px solid var(--blue); }
+  .card.c-blue .num { color: var(--blue); }
+  .cards.core { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+  .cards.core .card { padding: 9px 14px; }
+  .cards.core .card .num { font-size: 28px; }
+  .cards.core .card .name { font-weight: 600; color: var(--text); font-size: 12px; }
+  .cards.core .card .sub { font-size: 11px; }
+  .cards.secondary { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); margin-bottom: 0; }
+  .cards.secondary .card { padding: 8px 14px; display: flex; align-items: baseline; gap: 8px; }
+  .cards.secondary .card .num { font-size: 20px; }
+  .cards.secondary .card .name { margin: 0; }
+  .cards.secondary .card .sub { display: none; }
+  .overview-row { display: grid; grid-template-columns: 230px 1fr; gap: 24px; align-items: center; }
+  @media (max-width: 900px) { .overview-row { grid-template-columns: 1fr; } }
+
+  .grid { display: grid; grid-template-columns: 2fr 1fr; gap: 14px; margin-bottom: 14px; }
+  @media (max-width: 960px) { .grid { grid-template-columns: 1fr; } }
+  .panel { background: rgba(21, 28, 44, .88); border: 1px solid var(--border); border-radius: 12px;
+           padding: 14px 16px; box-shadow: 0 1px 0 rgba(255, 255, 255, .03) inset,
+           0 6px 18px rgba(0, 0, 0, .25); }
+  #chart-wrap svg { display: block; width: 100%; }
+  .legend { display: flex; gap: 14px; font-size: 12px; color: var(--text2); margin-bottom: 4px;
+            flex-wrap: wrap; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px;
+              margin-right: 4px; vertical-align: -1px; }
+
+  .bar-row { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+  .bar-row .bar-label { width: 130px; text-align: right; color: var(--text2); font-size: 13px;
+                        white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .bar-track { flex: 1; background: #1d2740; border-radius: 4px; height: 14px; overflow: hidden;
+               display: flex; }
+  .bar-track > span { display: block; height: 100%; min-width: 0; }
+  .bar-row .bar-count { width: 76px; font-size: 12px; color: var(--text2); font-variant-numeric:
+                        tabular-nums; white-space: nowrap; }
+  .bar-row .bar-count.svc { width: 160px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border);
+           vertical-align: top; }
+  th { color: var(--text2); font-weight: 500; white-space: nowrap; background: rgba(26, 35, 54, .8); }
+  tbody tr:hover { background: rgba(91, 140, 255, .07); cursor: pointer; }
+  td.wrap { max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .badge { display: inline-block; border-radius: 4px; padding: 0 8px; font-size: 12px;
+           line-height: 20px; white-space: nowrap; border: 1px solid transparent; }
+  .b-FIXED       { background: rgba(52, 211, 153, .12); color: var(--green); border-color: rgba(52, 211, 153, .3); }
+  .b-NOT_NEEDED  { background: rgba(148, 163, 184, .1); color: #a8b3c7; border-color: rgba(148, 163, 184, .25); }
+  .b-FAILED      { background: rgba(248, 113, 113, .12); color: var(--red); border-color: rgba(248, 113, 113, .32); }
+  .b-MANUAL_PENDING { background: rgba(251, 191, 36, .12); color: var(--orange); border-color: rgba(251, 191, 36, .3); }
+  .b-HANDOVER    { background: rgba(167, 139, 250, .12); color: var(--purple); border-color: rgba(167, 139, 250, .3); }
+  .b-NULL        { background: rgba(100, 116, 139, .14); color: #94a3b8; border-color: rgba(100, 116, 139, .3); }
+  .b-merged      { background: rgba(52, 211, 153, .12); color: var(--green); border-color: rgba(52, 211, 153, .3); }
+  .b-open        { background: rgba(91, 140, 255, .12); color: #8fb0ff; border-color: rgba(91, 140, 255, .3); }
+  .b-closed      { background: rgba(148, 163, 184, .1); color: #a8b3c7; border-color: rgba(148, 163, 184, .25); }
+  .b-unknown     { background: rgba(100, 116, 139, .14); color: #94a3b8; border-color: rgba(100, 116, 139, .3); }
+  .b-repeated    { background: rgba(251, 191, 36, .12); color: var(--orange); border-color: rgba(251, 191, 36, .3); }
+  .b-recurred    { background: rgba(248, 113, 113, .12); color: var(--red); border-color: rgba(248, 113, 113, .32); }
+  .b-level-ERROR { background: rgba(248, 113, 113, .12); color: var(--red); border-color: rgba(248, 113, 113, .32); }
+  .b-level-FATAL { background: #7f1d1d; color: #fecaca; border-color: #b91c1c; }
+  .b-level-WARN  { background: rgba(251, 191, 36, .12); color: var(--orange); border-color: rgba(251, 191, 36, .3); }
+  .b-level-INFO  { background: rgba(148, 163, 184, .1); color: #a8b3c7; border-color: rgba(148, 163, 184, .25); }
+
+  .pager { display: flex; align-items: center; gap: 10px; margin-top: 12px;
+           color: var(--text2); font-size: 13px; }
+
+  .modal-mask { display: none; position: fixed; inset: 0; background: rgba(4, 8, 18, .68);
+                z-index: 50; }
+  .modal { display: none; position: fixed; z-index: 51; top: 4vh; left: 50%; transform: translateX(-50%);
+           width: min(880px, 94vw); max-height: 90vh; overflow: auto;
+           background: var(--panel); border: 1px solid var(--border2); border-radius: 12px;
+           padding: 20px 24px; }
+  .modal h2 { margin: 0 0 4px; font-size: 16px; }
+  .modal .close { position: sticky; float: right; top: 0; }
+  .kv-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+             gap: 6px 18px; margin: 8px 0; }
+  .kv-grid .k { color: var(--text2); font-size: 12px; }
+  .kv-grid .v { word-break: break-all; }
+  pre.block { background: #101726; border: 1px solid var(--border); border-radius: 8px;
+              padding: 10px 12px; white-space: pre-wrap; word-break: break-word;
+              font-size: 12px; max-height: 320px; overflow: auto; margin: 0; }
+  details { margin-top: 8px; }
+  summary { cursor: pointer; color: var(--text2); font-size: 13px; }
+
+  .donut-wrap { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+  .donut-svg { position: relative; width: 165px; height: 165px; }
+  .donut-svg svg { width: 100%; height: 100%; display: block; }
+  .donut-seg { transition: stroke-width .15s, opacity .15s; cursor: default; }
+  .donut-svg.hovering .donut-seg { opacity: .25; }
+  .donut-svg.hovering .donut-seg:hover { opacity: 1; stroke-width: 42; }
+  .donut-center { position: absolute; inset: 0; display: flex; flex-direction: column;
+                  align-items: center; justify-content: center; pointer-events: none; }
+  .donut-num { font-size: 30px; font-weight: 700; line-height: 1.2; }
+  .donut-cap { font-size: 11px; color: var(--text2); max-width: 110px; text-align: center;
+               white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .donut-legend { width: 100%; }
+  .donut-item { font-size: 12px; color: var(--text2); margin: 4px 0; white-space: nowrap; }
+  .donut-item i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; }
+  .donut-item b { color: var(--text); }
+  .recent-item { display: flex; align-items: center; gap: 8px; padding: 7px 6px;
+                 border-bottom: 1px solid var(--border); cursor: pointer; font-size: 12px;
+                 border-radius: 4px; }
+  .recent-item:hover { background: rgba(91, 140, 255, .07); }
+  .recent-item .recent-time { color: var(--slate); flex: none; font-variant-numeric: tabular-nums; }
+  .recent-item .recent-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+                               white-space: nowrap; color: var(--text); }
+  .recent-item .recent-side { flex: none; display: flex; gap: 4px; }
+  .tip-line { display: none; position: absolute; width: 1px; background: rgba(91, 140, 255, .55);
+              pointer-events: none; z-index: 4; }
+  .tip-box { display: none; position: absolute; z-index: 5; background: #1c2536;
+             border: 1px solid var(--border2); border-radius: 6px;
+             box-shadow: 0 4px 14px rgba(0, 0, 0, .4); padding: 5px 10px;
+             font-size: 12px; pointer-events: none; white-space: nowrap; }
+  .tip-box b { display: block; color: var(--text2); font-weight: 600; margin-bottom: 2px; }
+  .tip-box span { margin-right: 10px; }
+  .tip-box i { display: inline-block; width: 8px; height: 8px; border-radius: 2px;
+               margin-right: 4px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="head-row">
+    <h1>告警看板</h1>
+    <span class="env-badge" id="env-badge">-</span>
+    <div class="controls">
+      <select id="f-service" title="服务筛选（总览与明细共用）"><option value="">全部服务</option></select>
+      <button id="btn-refresh">刷新</button>
+      <label class="auto"><input type="checkbox" id="f-auto" checked> 自动</label>
+    </div>
+  </div>
+  <nav class="tabs">
+    <button class="tab-btn active" data-tab="overview">总览</button>
+    <button class="tab-btn" data-tab="list">告警明细</button>
+  </nav>
+</header>
+
+<main>
+  <div class="banner" id="banner"></div>
+
+  <!-- ==================== 分区一：总览（KPI → 趋势 → 问题点） ==================== -->
+  <section class="tab-panel active" id="tab-overview">
+    <div class="strip">
+      <span class="label">统计窗口</span>
+      <select id="f-days" title="KPI 与分布的统计窗口（趋势图固定：按日近 30 天 / 按周近 12 周）">
+        <option value="7">近 7 天</option>
+        <option value="14" selected>近 14 天</option>
+        <option value="30">近 30 天</option>
+        <option value="60">近 60 天</option>
+        <option value="90">近 90 天</option>
+      </select>
+    </div>
+
+    <div class="section-title">处理概览</div>
+    <div class="grid" style="grid-template-columns: 2fr 1fr">
+      <div class="panel">
+        <div class="overview-row">
+          <div id="overview-donut"></div>
+          <div class="cards core" id="kpis-core" style="margin-bottom:0"></div>
+        </div>
+        <div class="cards secondary" id="kpis-more" style="margin-top:12px;margin-bottom:0"></div>
+      </div>
+      <div class="panel">
+        <div class="section-title">最新告警</div>
+        <div class="muted small" style="margin:-4px 0 4px">近 30 天最新 8 条 · 点击查看详情</div>
+        <div id="recent-list"><p class="muted small">加载中…</p></div>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="panel">
+        <div class="section-title" style="display:flex;align-items:center;gap:12px">问题数趋势
+          <span class="seg">
+            <button class="seg-btn active" data-mode="daily">按日（近 30 天）</button>
+            <button class="seg-btn" data-mode="weekly">按周（近 12 周）</button>
+          </span>
+        </div>
+        <div class="legend">
+          <span><i style="background:#5b8cff"></i><span id="leg-added">每日新增告警</span></span>
+          <span><i style="background:#34d399"></i><span id="leg-fixed">每日修复（按修复时间）</span></span>
+          <span><i style="background:#fbbf24"></i><span id="leg-repeat">每日重复告警</span></span>
+        </div>
+        <div id="chart-wrap"></div>
+      </div>
+      <div class="panel">
+        <div class="section-title">问题归因分布</div>
+        <div id="problem-dist"></div>
+        <div class="section-sub">重复与复发（窗口内）</div>
+        <div id="repeat-dist"></div>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-bottom:14px">
+      <div class="section-title">服务问题点 TOP10（按告警量）</div>
+      <div class="legend">
+        <span><i style="background:#34d399"></i>已解决</span>
+        <span><i style="background:#fbbf24"></i>未处理</span>
+        <span><i style="background:#f87171"></i>修复失败</span>
+        <span><i style="background:#475569"></i>其他（无需处理/转人工）</span>
+      </div>
+      <div id="service-dist"></div>
+    </div>
+  </section>
+
+  <!-- ==================== 分区二：告警明细 ==================== -->
+  <section class="tab-panel" id="tab-list">
+    <div class="strip">
+      <span class="label">时间</span>
+      <select id="f-list-days" title="明细查询时间范围">
+        <option value="7">近 7 天</option>
+        <option value="30" selected>近 30 天</option>
+        <option value="90">近 90 天</option>
+        <option value="0">全部</option>
+      </select>
+      <select id="f-status" title="处理状态筛选">
+        <option value="">全部状态</option>
+        <option value="NULL">未处理</option>
+        <option value="FIXED">已修复</option>
+        <option value="NOT_NEEDED">无需处理</option>
+        <option value="FAILED">修复失败</option>
+        <option value="MANUAL_PENDING">待人工处理</option>
+        <option value="HANDOVER">已转人工排查</option>
+      </select>
+      <input type="search" id="f-q" placeholder="搜 traceId / 接口">
+      <span class="muted small" id="list-hint"></span>
+    </div>
+    <div class="panel">
+      <table>
+        <thead>
+          <tr>
+            <th>时间</th><th>级别</th><th>服务</th><th>标题 / 接口</th>
+            <th>归因</th><th>重复</th><th>处理状态</th><th>合并</th>
+          </tr>
+        </thead>
+        <tbody id="tbody"><tr><td colspan="8" class="muted">加载中…</td></tr></tbody>
+      </table>
+      <div class="pager">
+        <button id="pg-prev">上一页</button>
+        <span id="pg-info">-</span>
+        <button id="pg-next">下一页</button>
+      </div>
+    </div>
+  </section>
+
+  <p class="muted small">
+    数据来源：alarm_analyze_result（只读）· 解决率口径与日报一致（剔除无需处理/转人工/待人工/重复）·
+    合并状态以 commit 对比 GitLab 为准（MR 状态兜底，结果缓存 5 分钟）
+  </p>
+</main>
+
+<div class="modal-mask" id="mask"></div>
+<div class="modal" id="modal"></div>
+
+<script>
+"use strict";
+const $ = (sel) => document.querySelector(sel);
+const state = { days: 14, listDays: 30, service: "", status: "", q: "", page: 1, size: 10,
+                total: 0, daily: [], weekly: [], trendMode: "daily" };
+
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g,
+  (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmtTime = (s) => (s ? String(s).replace("T", " ").slice(0, 19) : "-");
+const pct = (n, d) => (d > 0 ? Math.round(n / d * 1000) / 10 : 0);
+
+async function api(path, params) {
+  const qs = new URLSearchParams(Object.entries(params || {})
+    .filter(([, v]) => v !== "" && v != null)).toString();
+  const res = await fetch(path + (qs ? "?" + qs : ""));
+  if (res.status === 401) { location.reload(); throw new Error("未认证"); }
+  const body = await res.json();
+  if (body.code !== 0) throw new Error(body.message || "查询失败");
+  return body.data;
+}
+
+function showError(msg) {
+  const el = $("#banner");
+  if (!msg) { el.style.display = "none"; return; }
+  el.textContent = msg; el.style.display = "block";
+}
+
+/* ---------------- KPI（分区：处理概览） ---------------- */
+
+function kpiCard(name, num, sub, cls) {
+  return `<div class="card ${cls || ""}"><div class="name">${esc(name)}</div>
+    <div class="num">${esc(num)}</div><div class="sub" title="${esc(sub || "")}">${esc(sub || "")}</div></div>`;
+}
+
+function renderKpis(data) {
+  const k = data.kpi;
+  const t = data.today || {};
+  const sumFixedByTime = (data.daily || []).reduce((s, d) => s + d.fixed_by_time, 0);
+  const core = [
+    kpiCard("问题数", k.total,
+      `近 ${data.window_days} 天新增 · 其中待处理 ${k.pending + k.failed} 条（未处理+失败）`),
+    kpiCard("修复数", k.fixed,
+      sumFixedByTime ? `窗口内按修复时间累计 ${sumFixedByTime} 条` : "窗口内已解决的告警数"),
+    kpiCard("修复率（窗口）", k.resolve_rate == null ? "-" : `${k.resolve_rate}%`,
+      "已解决 ÷ (总数 − 无需处理 − 转人工 − 待人工 − 重复)", "c-green"),
+    kpiCard("修复率（当日）", t.rate == null ? "-" : `${t.rate}%`,
+      t.total == null ? "-" : `今日新增 ${t.total} · 已解决 ${t.fixed} · 今日修复 ${t.fixed_by_time}`,
+      "c-green"),
+  ];
+  $("#kpis-core").innerHTML = core.join("");
+  const more = [
+    kpiCard("未处理", k.pending, "", k.pending > 0 ? "c-orange" : ""),
+    kpiCard("修复失败", k.failed, "", k.failed > 0 ? "c-red" : ""),
+    kpiCard("待人工", k.manual, "", k.manual > 0 ? "c-orange" : ""),
+    kpiCard("无需处理", k.not_needed, ""),
+    kpiCard("已合并", k.merged,
+      k.merge_checked ? `${k.merge_rate}% · 已查 ${k.merge_checked} 条` : "GitLab 未查", "c-blue"),
+  ];
+  $("#kpis-more").innerHTML = more.join("");
+}
+
+/* ---------------- 折线图（SVG 自绘：三指标 + 面积渐变 + 悬浮联动） ---------------- */
+
+const TREND_KEYS = [
+  { key: "total", color: "#5b8cff", name: "新增" },
+  { key: "fixed_by_time", color: "#34d399", name: "修复" },
+  { key: "repeated", color: "#fbbf24", name: "重复", dashed: true },
+];
+const CHART_GRID = "rgba(148, 163, 199, .12)";
+const CHART_TEXT = "#7e8aa8";
+const CHART_POINT_STROKE = "#151c2c";
+
+function niceMax(v) {
+  if (v <= 5) return 5;
+  const p = Math.pow(10, Math.floor(Math.log10(v)));
+  for (const m of [1, 2, 5, 10]) if (m * p >= v) return m * p;
+  return 10 * p;
+}
+
+function renderTrend(series) {
+  const wrap = $("#chart-wrap");
+  if (!series || series.length === 0) { wrap.innerHTML = '<p class="muted">暂无数据</p>'; return; }
+  const W = Math.max(560, wrap.clientWidth || 720), H = 260;
+  const pad = { l: 42, r: 14, t: 12, b: 28 };
+  const iw = W - pad.l - pad.r, ih = H - pad.t - pad.b;
+  const maxY = niceMax(Math.max(1,
+    ...series.map((d) => Math.max(d.total, d.fixed_by_time, d.repeated || 0))));
+  const x = (i) => pad.l + (series.length === 1 ? iw / 2 : (i * iw) / (series.length - 1));
+  const y = (v) => pad.t + ih * (1 - v / maxY);
+  const base = pad.t + ih;
+  const short = (d) => d.label || d.date.slice(5);       // 周序列带 label(周一)，日序列截 MM-dd
+  const period = (d) => d.week ? `${d.week}（${d.label} 起）` : d.date;
+
+  let svg = [`<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">`];
+  svg.push("<defs>");
+  for (const { key, color, dashed } of TREND_KEYS) {
+    if (dashed) continue;  // 重复线（虚线）不加面积
+    svg.push(`<linearGradient id="grad-${key}" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="${color}" stop-opacity=".26"/>
+      <stop offset="1" stop-color="${color}" stop-opacity="0"/></linearGradient>`);
+  }
+  svg.push("</defs>");
+  for (let t = 0; t <= 4; t++) {
+    const v = (maxY / 4) * t, yy = y(v);
+    svg.push(`<line x1="${pad.l}" y1="${yy}" x2="${W - pad.r}" y2="${yy}"
+      stroke="${CHART_GRID}" stroke-width="1"/>`);
+    svg.push(`<text x="${pad.l - 6}" y="${yy + 4}" text-anchor="end" font-size="11"
+      fill="${CHART_TEXT}">${Math.round(v)}</text>`);
+  }
+  const step = Math.ceil(series.length / 8);
+  series.forEach((d, i) => {
+    if (i % step === 0 || i === series.length - 1) {
+      svg.push(`<text x="${x(i)}" y="${H - 8}" text-anchor="middle" font-size="11"
+        fill="${CHART_TEXT}">${short(d)}</text>`);
+    }
+  });
+  for (const { key, color, dashed } of TREND_KEYS) {
+    const pts = series.map((d, i) => `${x(i)},${y(d[key] || 0)}`);
+    if (!dashed && pts.length > 1) {
+      svg.push(`<polygon points="${pts.join(" ")} ${x(series.length - 1)},${base} ${x(0)},${base}"
+        fill="url(#grad-${key})"/>`);
+    }
+    const dashAttr = dashed ? ' stroke-dasharray="5 4"' : "";
+    svg.push(`<polyline points="${pts.join(" ")}" fill="none" stroke="${color}"
+      stroke-width="2"${dashAttr}/>`);
+    series.forEach((d, i) => {
+      svg.push(`<circle class="k-${key}" cx="${x(i)}" cy="${y(d[key] || 0)}" r="3"
+        fill="${color}" stroke="${CHART_POINT_STROKE}" stroke-width="1"/>`);
+    });
+  }
+  svg.push("</svg>");
+  wrap.innerHTML = svg.join("") +
+    '<div class="tip-line" id="tip-line"></div><div class="tip-box" id="tip-box"></div>';
+  wrap.style.position = "relative";
+
+  const move = (e) => {
+    const rect = wrap.getBoundingClientRect();
+    const wx = (e.clientX - rect.left) * (W / rect.width);
+    if (wx < pad.l - 12 || wx > W - pad.r + 12) return hideTip();
+    const slot = series.length > 1 ? iw / (series.length - 1) : 0;
+    let idx = Math.round((wx - pad.l) / (slot || 1));
+    idx = Math.max(0, Math.min(series.length - 1, idx));
+    const d = series[idx];
+    const px = (x(idx) / W) * rect.width;
+    const line = $("#tip-line"), box = $("#tip-box");
+    line.style.display = "block";
+    line.style.left = px + "px";
+    line.style.top = (pad.t / H) * rect.height + "px";
+    line.style.height = (ih / H) * rect.height + "px";
+    for (const { key } of TREND_KEYS)
+      wrap.querySelectorAll(`.k-${key}`).forEach((c, i) => c.setAttribute("r", i === idx ? 5.5 : 3));
+    box.innerHTML = `<b>${period(d)}</b>` + TREND_KEYS.map(({ key, color, name }) =>
+      `<span><i style="background:${color}"></i>${name} ${d[key] || 0}</span>`).join("");
+    box.style.display = "block";
+    box.style.left = Math.min(rect.width - 210, px + 10) + "px";
+    box.style.top = "8px";
+  };
+  wrap.onmousemove = move;
+  wrap.onmouseleave = hideTip;
+
+  function hideTip() {
+    $("#tip-line").style.display = "none";
+    $("#tip-box").style.display = "none";
+    for (const { key } of TREND_KEYS)
+      wrap.querySelectorAll(`.k-${key}`).forEach((c) => c.setAttribute("r", 3));
+  }
+}
+
+/* ---------------- 环形图（SVG 分段，悬浮高亮 + 中心联动） ---------------- */
+
+const STATUS_COLORS = { FIXED: "#34d399", NOT_NEEDED: "#64748b", FAILED: "#f87171",
+  MANUAL_PENDING: "#fbbf24", HANDOVER: "#a78bfa", NULL: "#475569" };
+
+function renderStatusDonut(rows) {
+  const el = $("#overview-donut");
+  const total = rows.reduce((s, r) => s + r.count, 0);
+  if (rows.length === 0 || total === 0) {
+    el.innerHTML = '<p class="muted small">窗口内暂无数据</p>';
+    return;
+  }
+  const R = 70, C = 2 * Math.PI * R;
+  let acc = 0;
+  const visible = rows.filter((r) => r.count > 0);
+  const segs = visible.map((r) => {
+    const frac = r.count / total;
+    const color = STATUS_COLORS[r.status] || "#64748b";
+    const dash = `${frac * C} ${C - frac * C}`;
+    const rot = (acc / total) * 360 - 90;  // 从 12 点方向起
+    acc += r.count;
+    return `<circle class="donut-seg" cx="100" cy="100" r="${R}" fill="none"
+      stroke="${color}" stroke-width="34" stroke-dasharray="${dash}"
+      transform="rotate(${rot} 100 100)"><title>${esc(r.label)} ${r.count} 条 · ${pct(r.count, total)}%</title></circle>`;
+  });
+  el.innerHTML = `
+    <div class="donut-wrap">
+      <div class="donut-svg" id="donut-svg">
+        <svg viewBox="0 0 200 200">${segs.join("")}</svg>
+        <div class="donut-center">
+          <div class="donut-num" id="donut-num">${total}</div>
+          <div class="donut-cap" id="donut-cap">告警总数</div>
+        </div>
+      </div>
+      <div class="donut-legend">
+        ${rows.map((r) => `<div class="donut-item">
+          <i style="background:${STATUS_COLORS[r.status] || "#64748b"}"></i>
+          ${esc(r.label)} <b>${r.count}</b> · ${pct(r.count, total)}%</div>`).join("")}
+      </div>
+    </div>`;
+  const svgBox = $("#donut-svg");
+  visible.forEach((r, i) => {
+    const seg = svgBox.querySelectorAll(".donut-seg")[i];
+    seg.addEventListener("mouseenter", () => {
+      svgBox.classList.add("hovering");
+      $("#donut-num").textContent = r.count;
+      $("#donut-cap").textContent = `${r.label} · ${pct(r.count, total)}%`;
+    });
+    seg.addEventListener("mouseleave", () => {
+      svgBox.classList.remove("hovering");
+      $("#donut-num").textContent = total;
+      $("#donut-cap").textContent = "告警总数";
+    });
+  });
+}
+
+const REPEAT_BAR_COLORS = { NORMAL: "#5b8cff", REPEATED: "#fbbf24", RECURRED: "#f87171" };
+
+/* ---------------- 分布条（含占比） ---------------- */
+
+function renderBars(el, rows, colorOf) {
+  const total = rows.reduce((s, r) => s + r.count, 0);
+  if (rows.length === 0 || total === 0) {
+    el.innerHTML = '<p class="muted small">窗口内暂无数据</p>';
+    return;
+  }
+  const max = Math.max(1, ...rows.map((r) => r.count));
+  el.innerHTML = rows.map((r) => {
+    const color = colorOf(r) || "#64748b";
+    return `<div class="bar-row">
+      <span class="bar-label" title="${esc(r.label)}">${esc(r.label)}</span>
+      <span class="bar-track"><span style="width:${(r.count / max) * 100}%;background:${color}"></span></span>
+      <span class="bar-count">${r.count} · ${pct(r.count, total)}%</span></div>`;
+  }).join("");
+}
+
+/* ---------------- 服务问题点（堆叠条） ---------------- */
+
+function renderServiceBars(rows) {
+  const el = $("#service-dist");
+  if (!rows || rows.length === 0) {
+    el.innerHTML = '<p class="muted small">窗口内暂无数据</p>';
+    return;
+  }
+  const max = Math.max(1, ...rows.map((r) => r.total));
+  el.innerHTML = rows.map((r) => {
+    const other = Math.max(0, r.total - r.fixed - r.pending - r.failed);
+    const open = r.pending + r.failed;
+    const seg = (n, color) => (n > 0
+      ? `<span style="width:${(n / max) * 100}%;background:${color}"></span>` : "");
+    return `<div class="bar-row">
+      <span class="bar-label" title="${esc(r.service)}">${esc(r.service)}</span>
+      <span class="bar-track">${seg(r.fixed, "#34d399")}${seg(r.pending, "#fbbf24")}${seg(r.failed, "#f87171")}${seg(other, "#475569")}</span>
+      <span class="bar-count svc">${r.total} 条 · 待处理 ${open}${open ? `（${pct(open, r.total)}%）` : ""}</span>
+    </div>`;
+  }).join("");
+}
+
+/* ---------------- 明细列表 ---------------- */
+
+function fixBadge(item) {
+  return `<span class="badge b-${esc(item.fix_status || "NULL")}">${esc(item.fix_label)}</span>`;
+}
+
+function mergeBadge(merge) {
+  if (!merge) return '<span class="muted">-</span>';
+  if (!merge.known) return '<span class="badge b-unknown">未知</span>';
+  if (merge.merged) return '<span class="badge b-merged">已合并</span>';
+  if (merge.mr_state === "opened") return '<span class="badge b-open">待合并</span>';
+  if (merge.mr_state === "closed") return '<span class="badge b-closed">已关闭</span>';
+  return '<span class="badge b-unknown">未合并</span>';
+}
+
+function repeatBadge(rt) {
+  if (!rt || rt === "NORMAL") return "";
+  const label = rt === "REPEATED" ? "重复" : "复发";
+  return `<span class="badge b-${rt.toLowerCase()}">${label}</span>`;
+}
+
+function renderTable(items) {
+  if (items.length === 0) {
+    $("#tbody").innerHTML = '<tr><td colspan="8" class="muted">没有符合条件的告警</td></tr>';
+    return;
+  }
+  $("#tbody").innerHTML = items.map((it) => `
+    <tr data-id="${it.id}">
+      <td class="small">${esc(fmtTime(it.create_time))}</td>
+      <td>${it.level ? `<span class="badge b-level-${esc(it.level)}">${esc(it.level)}</span>` : "-"}</td>
+      <td class="wrap" title="${esc(it.service || "")}">${esc(it.service || "-")}</td>
+      <td class="wrap"><div>${esc(it.title || "-")}</div>
+        <div class="muted small">${esc(it.interface || "")}</div></td>
+      <td>${esc(it.problem_label || "-")}</td>
+      <td>${repeatBadge(it.repeat_type) || '<span class="muted">-</span>'}</td>
+      <td>${fixBadge(it)}</td>
+      <td>${mergeBadge(it.merge)}</td>
+    </tr>`).join("");
+  $("#tbody").querySelectorAll("tr[data-id]").forEach((tr) => {
+    tr.addEventListener("click", () => openDetail(Number(tr.dataset.id)));
+  });
+}
+
+function renderPager() {
+  const pages = Math.max(1, Math.ceil(state.total / state.size));
+  $("#pg-info").textContent = `第 ${state.page} / ${pages} 页 · 共 ${state.total} 条`;
+  $("#pg-prev").disabled = state.page <= 1;
+  $("#pg-next").disabled = state.page >= pages;
+}
+
+/* ---------------- 详情弹窗 ---------------- */
+
+function mergeSection(merge) {
+  if (!merge) return "";
+  let badge = '<span class="badge b-unknown">未知（GitLab 未配置或查询失败）</span>';
+  if (merge.known) {
+    if (merge.merged) badge = '<span class="badge b-merged">已合并</span>';
+    else if (merge.mr_state === "opened") badge = '<span class="badge b-open">待合并</span>';
+    else if (merge.mr_state === "closed") badge = '<span class="badge b-closed">已关闭</span>';
+    else badge = '<span class="badge b-unknown">未合并</span>';
+  }
+  const commitLine = merge.commit_merged == null ? "" :
+    `<div class="small muted">commit ${esc(merge.commit_id || "-")}
+      ${merge.commit_merged ? "已包含在基线分支（已合并）" : "尚未包含在基线分支"}</div>`;
+  const links = [];
+  if (merge.mr_url) links.push(`<a href="${esc(merge.mr_url)}" target="_blank" rel="noopener">查看 MR</a>`);
+  if (merge.commit_url) links.push(`<a href="${esc(merge.commit_url)}" target="_blank" rel="noopener">查看改动</a>`);
+  return `<div class="section-title" style="margin-top:16px">合并状态</div>${badge}
+    <div class="small muted" style="margin-top:4px">分支 <code>${esc(merge.branch || "-")}</code>
+      ${links.length ? " · " + links.join(" · ") : ""}</div>${commitLine}`;
+}
+
+function kv(k, v) { return `<div><div class="k">${esc(k)}</div><div class="v">${v}</div></div>`; }
+
+function preBlock(v) { return `<pre class="block">${esc(v || "（无）")}</pre>`; }
+
+async function openDetail(id) {
+  const m = $("#modal");
+  m.innerHTML = '<p class="muted">加载中…</p>';
+  $("#mask").style.display = "block"; m.style.display = "block";
+  let d;
+  try { d = await api(`/api/dashboard/alarms/${id}`); }
+  catch (err) { m.innerHTML = `<p style="color:var(--red)">${esc(err.message)}</p>`; return; }
+  const a = d.analyze || {};
+  m.innerHTML = `
+    <button class="close" id="btn-close">关闭</button>
+    <h2>${esc(a.title || d.trace_id || `告警 #${d.id}`)}</h2>
+    <div>${fixBadge({ fix_status: d.fix_status, fix_label: d.fix_label })}
+      ${d.repeat_type && d.repeat_type !== "NORMAL"
+        ? ` ${repeatBadge(d.repeat_type)}` : ""}</div>
+    <div class="kv-grid">
+      ${kv("服务", esc(d.service || "-"))}
+      ${kv("环境", esc(a.env || "-"))}
+      ${kv("接口", d.interface ? esc(d.interface) : "-")}
+      ${kv("traceId", esc(d.trace_id || "-"))}
+      ${kv("告警时间", esc(a.time || fmtTime(d.create_time)))}
+      ${kv("级别", esc(a.level || "-"))}
+      ${kv("异常类", esc(a.exceptionClass || "-"))}
+      ${kv("涉及表", esc(a.tables || "-"))}
+      ${kv("问题归因", esc(d.problem_label || "-"))}
+      ${kv("修复时间", esc(fmtTime(d.fix_time)))}
+      ${d.root_id ? kv("根告警记录", "#" + d.root_id) : ""}
+    </div>
+    <div class="section-title" style="margin-top:16px">处理情况</div>
+    <pre class="block">${esc(d.fix_summary || "尚未发起修复")}</pre>
+    ${mergeSection(d.merge)}
+    <div class="section-title" style="margin-top:16px">AI 分析</div>${preBlock(a.analysis)}
+    <div class="section-title" style="margin-top:16px">修复建议</div>${preBlock(a.proposal)}
+    <details><summary>核心报错信息</summary>${preBlock(a.coreMessage)}</details>
+    <details><summary>出错代码片段</summary>${preBlock(a.codeContext)}</details>
+    <details><summary>数据库上下文</summary>${preBlock(a.dbContext)}</details>
+    <details><summary>完整堆栈</summary>${preBlock(a.stackTrace)}</details>
+    <details><summary>请求参数</summary>${preBlock(a.requestParam)}</details>
+    <details><summary>原始 JSON</summary>${preBlock(JSON.stringify(a, null, 2))}</details>`;
+  $("#btn-close").addEventListener("click", closeModal);
+}
+
+function closeModal() {
+  $("#modal").style.display = "none"; $("#mask").style.display = "none";
+}
+$("#mask").addEventListener("click", closeModal);
+
+/* ---------------- 标签页 ---------------- */
+
+function showTab(name) {
+  document.querySelectorAll(".tab-btn").forEach((b) =>
+    b.classList.toggle("active", b.dataset.tab === name));
+  document.querySelectorAll(".tab-panel").forEach((p) =>
+    p.classList.toggle("active", p.id === `tab-${name}`));
+}
+document.querySelectorAll(".tab-btn").forEach((b) =>
+  b.addEventListener("click", () => showTab(b.dataset.tab)));
+
+/* ---------------- 按日 / 按周切换 ---------------- */
+
+function setTrendMode(mode) {
+  state.trendMode = mode;
+  document.querySelectorAll(".seg-btn").forEach((b) =>
+    b.classList.toggle("active", b.dataset.mode === mode));
+  const weekly = mode === "weekly";
+  $("#leg-added").textContent = weekly ? "周新增告警" : "每日新增告警";
+  $("#leg-fixed").textContent = weekly ? "周修复（按修复时间）" : "每日修复（按修复时间）";
+  $("#leg-repeat").textContent = weekly ? "周重复告警" : "每日重复告警";
+  renderTrend(weekly ? state.weekly : state.daily);
+}
+document.querySelectorAll(".seg-btn").forEach((b) =>
+  b.addEventListener("click", () => setTrendMode(b.dataset.mode)));
+
+/* ---------------- 最新告警速览 ---------------- */
+
+async function loadRecent() {
+  const el = $("#recent-list");
+  try {
+    const data = await api("/api/dashboard/alarms",
+      { page: 1, size: 8, days: 30, service: state.service });
+    if (data.items.length === 0) { el.innerHTML = '<p class="muted small">近 30 天暂无告警</p>'; return; }
+    el.innerHTML = data.items.map((it) => `
+      <div class="recent-item" data-id="${it.id}" title="${esc(it.title || "")}">
+        <span class="recent-time">${esc(fmtTime(it.create_time).slice(5, 16))}</span>
+        <span class="recent-title">${esc(it.service || "")} · ${esc(it.title || "-")}</span>
+        <span class="recent-side">${fixBadge(it)}${it.merge ? mergeBadge(it.merge) : ""}</span>
+      </div>`).join("");
+    el.querySelectorAll(".recent-item").forEach((item) =>
+      item.addEventListener("click", () => openDetail(Number(item.dataset.id))));
+  } catch (err) { el.innerHTML = `<p class="muted small">${esc(err.message)}</p>`; }
+}
+
+/* ---------------- 加载与事件 ---------------- */
+
+async function loadOverview() {
+  try {
+    const data = await api("/api/dashboard/overview",
+      { days: state.days, service: state.service });
+    $("#env-badge").textContent = data.env || "-";
+    renderKpis(data);
+    state.daily = data.daily;
+    state.weekly = data.weekly;
+    renderTrend(state.trendMode === "weekly" ? state.weekly : state.daily);
+    renderStatusDonut(data.status_distribution);
+    renderBars($("#problem-dist"), data.problem_distribution, () => "#5b8cff");
+    renderBars($("#repeat-dist"), data.repeat_distribution, (r) => REPEAT_BAR_COLORS[r.type]);
+    renderServiceBars(data.services);
+    showError("");
+  } catch (err) { showError(err.message); }
+}
+
+async function loadList() {
+  $("#tbody").innerHTML = '<tr><td colspan="8" class="muted">加载中…</td></tr>';
+  try {
+    const data = await api("/api/dashboard/alarms", {
+      page: state.page, size: state.size, days: state.listDays,
+      service: state.service, status: state.status, q: state.q,
+    });
+    state.total = data.total;
+    $("#list-hint").textContent = state.listDays > 0 ? `近 ${state.listDays} 天` : "全部时间";
+    renderTable(data.items);
+    renderPager();
+  } catch (err) { showError(err.message); }
+}
+
+async function loadServices() {
+  try {
+    const services = await api("/api/dashboard/services");
+    $("#f-service").innerHTML = '<option value="">全部服务</option>' +
+      services.map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join("");
+  } catch (err) { /* 筛选项加载失败不阻断 */ }
+}
+
+function reload() { state.page = 1; loadOverview(); loadList(); loadRecent(); }
+
+function bindControls() {
+  $("#f-days").addEventListener("change", (e) => { state.days = Number(e.target.value); loadOverview(); });
+  $("#f-list-days").addEventListener("change", (e) => { state.listDays = Number(e.target.value); state.page = 1; loadList(); });
+  $("#f-service").addEventListener("change", (e) => { state.service = e.target.value; reload(); });
+  $("#f-status").addEventListener("change", (e) => { state.status = e.target.value; state.page = 1; loadList(); });
+  let qTimer = null;
+  $("#f-q").addEventListener("input", (e) => {
+    clearTimeout(qTimer);
+    qTimer = setTimeout(() => { state.q = e.target.value.trim(); state.page = 1; loadList(); }, 400);
+  });
+  $("#btn-refresh").addEventListener("click", reload);
+  $("#pg-prev").addEventListener("click", () => { state.page -= 1; loadList(); });
+  $("#pg-next").addEventListener("click", () => { state.page += 1; loadList(); });
+  $("#f-auto").addEventListener("change", (e) => setAuto(e.target.checked));
+  window.addEventListener("resize", () =>
+    renderTrend(state.trendMode === "weekly" ? state.weekly : state.daily));
+}
+
+function setAuto(on) {
+  clearInterval(state.timer);
+  if (on) state.timer = setInterval(() => { loadOverview(); loadList(); loadRecent(); }, 60000);
+}
+
+bindControls();
+setAuto(true);
+loadServices();
+reload();
+</script>
+</body>
+</html>

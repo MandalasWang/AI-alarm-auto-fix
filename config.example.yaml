@@ -123,6 +123,12 @@ executor:
   workers: 4                            # 分析/修复线程池上限（Java 版 core 2 / max 4）
   queue_size: 100                       # 队列上限；满时退化为调用线程执行（不丢任务）
 
+dashboard:
+  enabled: true                         # Web 告警看板（http://host:8800/dashboard，只读）
+  username: ""                          # 可选 HTTP Basic 认证用户名；与 password 同时非空才启用鉴权
+  password: ""                          # 可选 Basic 认证密码（环境变量 ALARM_DASHBOARD_PASSWORD 可覆盖）
+  merge_cache_seconds: 300              # 「是否合并」GitLab 查询结果的进程内缓存秒数
+
 server:
   host: 0.0.0.0
   port: 8800

@@ -48,6 +48,11 @@ def create_app(config_path: str | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.include_router(build_router(container))
+    if cfg.dashboard.enabled:
+        from app.web.dashboard import build_dashboard_router
+
+        app.include_router(build_dashboard_router(container))
+        log.info("Web 告警看板已启用: /dashboard")
     return app
 
 

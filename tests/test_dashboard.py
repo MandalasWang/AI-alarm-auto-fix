@@ -205,8 +205,10 @@ class FakeRepository:
         self.content = ('{"title":"数据库查询异常","level":"ERROR","analysis":"分析内容",'
                         '"proposal":"修复建议","service":"svc-a"}')
 
-    def dashboard_aggregates(self, start, service=None, weekly_start=None, daily_start=None):
+    def dashboard_aggregates(self, start, service=None, weekly_start=None, daily_start=None,
+                             system_type=None):
         assert service in (None, "svc-a")
+        assert system_type in (None, "ccd")
         monday = date.today() - timedelta(days=date.today().weekday())  # 当前 ISO 周周一
         return {
             "fix_status": {"FIXED": 1, "NOT_NEEDED": 1, "FAILED": 1, "NULL": 1},
@@ -223,7 +225,7 @@ class FakeRepository:
         }
 
     def page_alarms(self, start, end, service=None, fix_status=None, keyword=None,
-                    offset=0, limit=20):
+                    offset=0, limit=20, system_type=None):
         records = [
             _record(1, "t-1", "FIXED", self.fixed_summary, self.content,
                     fix_time=datetime(2026, 9, 17, 10, 0)),
@@ -244,8 +246,11 @@ class FakeRepository:
         return _record(1, "t-1", "FIXED", self.fixed_summary, self.content,
                        fix_time=datetime(2026, 9, 17, 10, 0))
 
-    def list_services(self, limit=500):
+    def list_services(self, limit=500, system_type=None):
         return ["svc-a", "svc-b"]
+
+    def list_system_types(self, limit=50):
+        return []  # 假数据无系统分类：前端应隐藏系统切换（兼容空值场景）
 
     def list_fixed_since(self, start, limit=50):
         return [_record(1, "t-1", "FIXED", self.fixed_summary, self.content,
@@ -349,6 +354,12 @@ def test_detail_not_found(client):
 
 def test_services_list(client):
     assert client.get("/api/dashboard/services").json()["data"] == ["svc-a", "svc-b"]
+
+
+def test_systems_endpoint_empty_means_service_only(client):
+    # system_type 全为空（历史数据）：返回空列表，前端据此隐藏系统切换、仅按服务筛选
+    body = client.get("/api/dashboard/systems").json()
+    assert body["code"] == 0 and body["data"] == []
 
 
 def test_dashboard_page_served(client):

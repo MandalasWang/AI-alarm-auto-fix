@@ -280,14 +280,16 @@ class MergeStateResolver:
 # ------------------------------------------------------------------ 组装逻辑（单测覆盖）
 
 def build_overview(repository: AlarmRepository, resolver: MergeStateResolver, env: str,
-                   days: int, service: str | None, now: datetime | None = None) -> dict:
+                   days: int, service: str | None, now: datetime | None = None,
+                   system_type: str | None = None) -> dict:
     """看板总览：KPI + 状态/归因/服务分布 + 每日（固定近 30 天）与每周（近 12 周）趋势。"""
     moment = now or datetime.now()
     start = window_start(days, moment)
     daily_start = window_start(30, moment)  # 日折线固定近 30 天，不随 KPI 窗口缩放
     agg = repository.dashboard_aggregates(start, service,
                                           weekly_start=weekly_start(moment),
-                                          daily_start=daily_start)
+                                          daily_start=daily_start,
+                                          system_type=system_type)
     status = agg["fix_status"]
     total = sum(status.values())
     fixed = status.get("FIXED", 0)
@@ -387,6 +389,7 @@ def _list_item(record: AlarmAnalyzeRecord, content: dict) -> dict:
         "id": record.id,
         "trace_id": record.trace_id,
         "service": record.service_name,
+        "system_type": record.system_type,
         "interface": record.interface_uri,
         "title": content.get("title") or f"{level or ''} 告警".strip(),
         "level": level,
@@ -440,13 +443,15 @@ def build_dashboard_router(container: Container) -> APIRouter:
 
     @router.get("/api/dashboard/overview", summary="看板总览：KPI + 状态/归因分布 + 每日趋势",
                 dependencies=[Depends(basic_auth_guard)])
-    def overview(days: int = Query(14, ge=1, le=90), service: str = "") -> dict:
+    def overview(days: int = Query(14, ge=1, le=90), service: str = "",
+                 system: str = "") -> dict:
         blocked = _require_repo()
         if blocked:
             return blocked
         try:
             return _ok(build_overview(container.repository, resolver, cfg.feishu.env,
-                                      days, service.strip() or None))
+                                      days, service.strip() or None,
+                                      system_type=system.strip() or None))
         except Exception as exc:  # noqa: BLE001 - 只读看板：查询失败返回明确错误而非 500 堆栈
             log.exception("看板总览查询失败")
             return _fail(f"看板数据查询失败: {exc}")
@@ -455,7 +460,7 @@ def build_dashboard_router(container: Container) -> APIRouter:
                 dependencies=[Depends(basic_auth_guard)])
     def alarms(page: int = Query(1, ge=1), size: int = Query(20, ge=1, le=100),
                days: int = Query(0, ge=0, le=365, description="最近 N 天；0=不限"),
-               service: str = "", status: str = "", q: str = "") -> dict:
+               service: str = "", status: str = "", q: str = "", system: str = "") -> dict:
         blocked = _require_repo()
         if blocked:
             return blocked
@@ -465,7 +470,8 @@ def build_dashboard_router(container: Container) -> APIRouter:
             records, total = container.repository.page_alarms(
                 start, end, service=service.strip() or None,
                 fix_status=status.strip() or None, keyword=q.strip() or None,
-                offset=(page - 1) * size, limit=size)
+                offset=(page - 1) * size, limit=size,
+                system_type=system.strip() or None)
         except Exception as exc:  # noqa: BLE001
             log.exception("看板告警列表查询失败")
             return _fail(f"看板数据查询失败: {exc}")
@@ -502,6 +508,7 @@ def build_dashboard_router(container: Container) -> APIRouter:
             "id": record.id,
             "trace_id": record.trace_id,
             "service": record.service_name,
+            "system_type": record.system_type,
             "interface": record.interface_uri,
             "create_time": record.create_time,
             "update_time": record.update_time,
@@ -518,16 +525,28 @@ def build_dashboard_router(container: Container) -> APIRouter:
             "merge": merge,
         })
 
-    @router.get("/api/dashboard/services", summary="看板筛选项：服务名列表",
+    @router.get("/api/dashboard/services", summary="看板筛选项：服务名列表（可按系统分类过滤）",
                 dependencies=[Depends(basic_auth_guard)])
-    def services() -> dict:
+    def services(system: str = "") -> dict:
         blocked = _require_repo()
         if blocked:
             return blocked
         try:
-            return _ok(container.repository.list_services())
+            return _ok(container.repository.list_services(system_type=system.strip() or None))
         except Exception as exc:  # noqa: BLE001
             log.exception("看板服务列表查询失败")
+            return _fail(f"看板数据查询失败: {exc}")
+
+    @router.get("/api/dashboard/systems", summary="看板筛选项：系统分类列表",
+                dependencies=[Depends(basic_auth_guard)])
+    def systems() -> dict:
+        blocked = _require_repo()
+        if blocked:
+            return blocked
+        try:
+            return _ok(container.repository.list_system_types())
+        except Exception as exc:  # noqa: BLE001
+            log.exception("看板系统分类查询失败")
             return _fail(f"看板数据查询失败: {exc}")
 
     return router

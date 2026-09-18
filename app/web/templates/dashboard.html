@@ -214,6 +214,9 @@
     <h1>告警看板</h1>
     <span class="env-badge" id="env-badge">-</span>
     <div class="controls">
+      <select id="f-system" title="系统分类切换（存在多个分类时显示）" style="display:none">
+        <option value="">全部系统</option>
+      </select>
       <select id="f-service" title="服务筛选（总览与明细共用）"><option value="">全部服务</option></select>
       <button id="btn-refresh">刷新</button>
       <label class="auto"><input type="checkbox" id="f-auto" checked> 自动</label>
@@ -344,8 +347,8 @@
 <script>
 "use strict";
 const $ = (sel) => document.querySelector(sel);
-const state = { days: 14, listDays: 30, service: "", status: "", q: "", page: 1, size: 10,
-                total: 0, daily: [], weekly: [], trendMode: "daily" };
+const state = { days: 14, listDays: 30, service: "", system: "", status: "", q: "", page: 1,
+                size: 10, total: 0, daily: [], weekly: [], trendMode: "daily" };
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g,
   (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -699,6 +702,7 @@ async function openDetail(id) {
         ? ` ${repeatBadge(d.repeat_type)}` : ""}</div>
     <div class="kv-grid">
       ${kv("服务", esc(d.service || "-"))}
+      ${kv("系统分类", esc(d.system_type || "-"))}
       ${kv("环境", esc(a.env || "-"))}
       ${kv("接口", d.interface ? esc(d.interface) : "-")}
       ${kv("traceId", esc(d.trace_id || "-"))}
@@ -761,7 +765,7 @@ async function loadRecent() {
   const el = $("#recent-list");
   try {
     const data = await api("/api/dashboard/alarms",
-      { page: 1, size: 8, days: 30, service: state.service });
+      { page: 1, size: 8, days: 30, service: state.service, system: state.system });
     if (data.items.length === 0) { el.innerHTML = '<p class="muted small">近 30 天暂无告警</p>'; return; }
     el.innerHTML = data.items.map((it) => `
       <div class="recent-item" data-id="${it.id}" title="${esc(it.title || "")}">
@@ -779,7 +783,7 @@ async function loadRecent() {
 async function loadOverview() {
   try {
     const data = await api("/api/dashboard/overview",
-      { days: state.days, service: state.service });
+      { days: state.days, service: state.service, system: state.system });
     $("#env-badge").textContent = data.env || "-";
     renderKpis(data);
     state.daily = data.daily;
@@ -798,7 +802,7 @@ async function loadList() {
   try {
     const data = await api("/api/dashboard/alarms", {
       page: state.page, size: state.size, days: state.listDays,
-      service: state.service, status: state.status, q: state.q,
+      service: state.service, status: state.status, q: state.q, system: state.system,
     });
     state.total = data.total;
     $("#list-hint").textContent = state.listDays > 0 ? `近 ${state.listDays} 天` : "全部时间";
@@ -809,9 +813,24 @@ async function loadList() {
 
 async function loadServices() {
   try {
-    const services = await api("/api/dashboard/services");
+    const services = await api("/api/dashboard/services", { system: state.system });
     $("#f-service").innerHTML = '<option value="">全部服务</option>' +
       services.map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join("");
+  } catch (err) { /* 筛选项加载失败不阻断 */ }
+}
+
+/* 系统分类切换：库里存在 >1 个分类时才显示该筛选项，否则仅按服务切换 */
+async function loadSystems() {
+  try {
+    const systems = await api("/api/dashboard/systems");
+    const sel = $("#f-system");
+    if (systems.length > 1) {
+      sel.style.display = "";
+      sel.innerHTML = '<option value="">全部系统</option>' +
+        systems.map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join("");
+    } else {
+      sel.style.display = "none";
+    }
   } catch (err) { /* 筛选项加载失败不阻断 */ }
 }
 
@@ -820,6 +839,12 @@ function reload() { state.page = 1; loadOverview(); loadList(); loadRecent(); }
 function bindControls() {
   $("#f-days").addEventListener("change", (e) => { state.days = Number(e.target.value); loadOverview(); });
   $("#f-list-days").addEventListener("change", (e) => { state.listDays = Number(e.target.value); state.page = 1; loadList(); });
+  $("#f-system").addEventListener("change", async (e) => {
+    state.system = e.target.value;
+    state.service = "";       // 切系统后服务选项随之变化，重置已选服务
+    await loadServices();
+    reload();
+  });
   $("#f-service").addEventListener("change", (e) => { state.service = e.target.value; reload(); });
   $("#f-status").addEventListener("change", (e) => { state.status = e.target.value; state.page = 1; loadList(); });
   let qTimer = null;
@@ -842,6 +867,7 @@ function setAuto(on) {
 
 bindControls();
 setAuto(true);
+loadSystems();
 loadServices();
 reload();
 </script>

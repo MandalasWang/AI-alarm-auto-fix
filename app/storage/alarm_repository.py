@@ -77,6 +77,24 @@ class AlarmRepository:
                     (fix_status, fix_summary[:1000], now, now, record_id),
                 )
 
+    def insert_audit(self, action: str, trace_id: str, outcome: str,
+                     service: str | None = None, from_status: str | None = None,
+                     to_status: str | None = None, detail: str | None = None,
+                     source_ip: str | None = None) -> None:
+        """操作审计落库（告警表不受影响；调用方需自行尽力而为，不因审计失败阻断主流程）。"""
+        now = datetime.now()
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "INSERT INTO alarm_operation_audit"
+                    " (create_time, action, trace_id, service_name, from_status, to_status,"
+                    "  outcome, detail, source_ip)"
+                    " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    (now, action, self._clip(trace_id, 255) or "", self._clip(service, 50),
+                     from_status, to_status, outcome,
+                     self._clip(detail, 500), self._clip(source_ip, 50)),
+                )
+
     # ------------------------------------------------------------------ 读
 
     def latest_by_trace_id(self, trace_id: str) -> AlarmAnalyzeRecord | None:

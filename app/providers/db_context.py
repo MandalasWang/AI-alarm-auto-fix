@@ -30,6 +30,32 @@ CONTEXT_MAX_LENGTH = 6000
 
 _TABLE_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
 
+# ---- 敏感数据掩码（analyse.db.mask_sensitive=true 时作用于样本行字符串值）----
+# 手机号：保留前 3 后 4（13x-19x 号段，前后不能紧邻数字防误切长号码）
+_PHONE_PATTERN = re.compile(r"(?<!\d)(1[3-9]\d)\d{4}(\d{4})(?!\d)")
+# 18 位身份证：保留前 4 后 3（末位可含 X/x）；15 位纯数字老证不与手机号冲突场景少，从简不单列
+_ID_CARD_PATTERN = re.compile(r"(?<!\d)(\d{4})\d{10}(\d{3}[\dXx])(?!\d)")
+# 邮箱：本地部分保留前 2 位（@ 与域名原样，域名多为企业内部已知信息）
+_EMAIL_PATTERN = re.compile(r"(?<![\w.%-])([\w]{1,2})[\w.%-]*@([\w-]+\.[\w.-]+)")
+
+_MASK_PATTERNS = (
+    (_ID_CARD_PATTERN, r"\1***********\2"),
+    (_PHONE_PATTERN, r"\1****\2"),
+    (_EMAIL_PATTERN, r"\1***@\2"),
+)
+
+
+def mask_sensitive_text(text: str) -> str:
+    """对文本中的 手机号/身份证/邮箱 做部分掩码（纯函数，单测锁定）。
+
+    掩码目标：样本行数据进 LLM 上下文/卡片/看板前降低敏感数据出库面，
+    同时保留首尾几位供排障比对（如用脱敏后的值反查业务日志）。
+    """
+    masked = text
+    for pattern, replacement in _MASK_PATTERNS:
+        masked = pattern.sub(replacement, masked)
+    return masked
+
 
 class DatabaseContextFetcher:
     def __init__(self, config: AppConfig, nacos_resolver: NacosConfigResolver):
@@ -146,11 +172,19 @@ class DatabaseContextFetcher:
         lines = []
         for row in rows:
             record = {
-                column: (_truncate(str(value), VALUE_MAX_LENGTH) if value is not None else None)
-                for column, value in zip(columns, row)
+                column: self._cell_text(value) for column, value in zip(columns, row)
             }
             lines.append(json.dumps(record, ensure_ascii=False, default=str))
         return "\n".join(lines)
+
+    def _cell_text(self, value) -> str | None:
+        """单格值渲染：截断 + 敏感掩码（mask_sensitive=true 时，手机号/身份证/邮箱部分打码）。"""
+        if value is None:
+            return None
+        text = _truncate(str(value), VALUE_MAX_LENGTH)
+        if self._db_config.mask_sensitive:
+            text = mask_sensitive_text(text)
+        return text
 
     def _biz_key_query(self, connection, table: str, alarm: AlarmLog) -> str | None:
         """businessKeys 的键与表列名匹配时构造等值查询（参数化），任一键可用即返回。"""

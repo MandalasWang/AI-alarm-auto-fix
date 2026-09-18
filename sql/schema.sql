@@ -28,6 +28,30 @@ CREATE TABLE IF NOT EXISTS alarm_analyze_result
   DEFAULT CHARSET = utf8mb4 COMMENT ='告警';
 
 -- ---------------------------------------------------------------------
+-- 操作审计表（独立于告警表，Java 版不受影响；写入为尽力而为，失败不影响主流程）
+-- 记录 修复/忽略/结案 的受理与终态：谁在何时对哪条告警做了什么（操作者身份依赖
+-- 接入层鉴权传递，跳转链接场景记录来源 IP）
+-- ---------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS alarm_operation_audit
+(
+    id           BIGINT       NOT NULL AUTO_INCREMENT COMMENT '主键自增',
+    create_time  DATETIME     NOT NULL COMMENT '操作时间',
+    action       VARCHAR(20)  NOT NULL COMMENT '动作：fix/ignore/resolve/fix_result',
+    trace_id     VARCHAR(255) NOT NULL COMMENT '告警链路id',
+    service_name VARCHAR(50)  NULL COMMENT '告警服务',
+    from_status  VARCHAR(20)  NULL COMMENT '操作前 fix_status',
+    to_status    VARCHAR(20)  NULL COMMENT '操作后 fix_status（受理类动作为空）',
+    outcome      VARCHAR(20)  NOT NULL COMMENT 'accepted=受理 / rejected=拒绝 / 具体终态',
+    detail       VARCHAR(500) NULL COMMENT '拒绝原因/修复说明摘要',
+    source_ip    VARCHAR(50)  NULL COMMENT '来源 IP',
+    PRIMARY KEY (id),
+    KEY idx_trace_id_time (trace_id, create_time),
+    KEY idx_create_time (create_time)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COMMENT ='告警操作审计';
+
+-- ---------------------------------------------------------------------
 -- 旧表对齐新结构（2026-09-18 批次）。注意：
 -- 1) trace_id 转 NOT NULL 前先回填：UPDATE alarm_analyze_result SET trace_id = '' WHERE trace_id IS NULL;
 -- 2) analyze_content 转 JSON 需 MySQL ≥ 5.7，且现有内容均为合法 JSON（应用层一直写合法 JSON）；

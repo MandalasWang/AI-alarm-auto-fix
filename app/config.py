@@ -210,6 +210,9 @@ class DbConfig(StrictModel):
     service_datasources: dict[str, str] = Field(default_factory=dict)
     sample_limit: int = 3
     query_timeout_seconds: int = 5
+    # 样本行敏感数据掩码（默认开）：手机号/身份证/邮箱部分打码后再进 LLM 上下文与卡片，
+    # 保留排障可辨识度（前几位+后几位）；关闭需自担敏感数据出库风险
+    mask_sensitive: bool = True
 
 
 class FixNotifyConfig(StrictModel):

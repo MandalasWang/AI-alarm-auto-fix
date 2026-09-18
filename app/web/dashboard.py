@@ -432,6 +432,9 @@ def build_dashboard_router(container: Container) -> APIRouter:
     cfg = container.config
     dash = cfg.dashboard
     resolver = MergeStateResolver(cfg, container.gitlab, dash.merge_cache_seconds)
+    if not (dash.username and dash.password):
+        log.warning("看板未配置 dashboard.username/password（HTTP Basic 鉴权关闭），"
+                    "告警内容/样本数据对可达网络明文暴露，生产环境建议配置")
 
     def basic_auth_guard(request: Request) -> None:
         """可选 HTTP Basic 鉴权：dashboard.username/password 同时非空才启用。"""

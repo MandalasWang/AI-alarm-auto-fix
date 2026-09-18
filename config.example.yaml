@@ -72,6 +72,7 @@ analyse:
     enabled: false
     sample_limit: 3
     query_timeout_seconds: 5
+    mask_sensitive: true                # 样本行敏感数据掩码（手机号/身份证/邮箱部分打码后再进 LLM 与卡片）
     nacos:                              # 按服务名从 Nacos 动态解析该服务的数据源
       enabled: true
       mode: direct-db                   # direct-db（直连 Nacos 配置库，推荐）/ open-api

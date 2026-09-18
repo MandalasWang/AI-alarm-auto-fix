@@ -52,6 +52,21 @@ def build_router(container: Container) -> APIRouter:
         if supplied != expected:
             raise HTTPException(status_code=401, detail="inner auth failed")
 
+    def _audit(action: str, trace_id: str, outcome: str, request: Request | None = None,
+               service: str | None = None, from_status: str | None = None,
+               to_status: str | None = None, detail: str | None = None) -> None:
+        """操作审计落库（尽力而为：未配业务库时不落库；写失败只记日志不阻断主流程）。"""
+        repository = container.repository
+        if repository is None:
+            return
+        try:
+            repository.insert_audit(
+                action=action, trace_id=trace_id, outcome=outcome, service=service,
+                from_status=from_status, to_status=to_status, detail=detail,
+                source_ip=request.client.host if request and request.client else None)
+        except Exception:  # noqa: BLE001
+            log.exception("操作审计写入失败, action=%s, traceId=%s", action, trace_id)
+
     # ------------------------------------------------------------------ 告警接收
 
     @router.post("/inner/feishu/alarm/receive", summary="接收告警日志，异步分析后推送飞书群卡片",
@@ -88,11 +103,16 @@ def build_router(container: Container) -> APIRouter:
     @router.get("/inner/feishu/alarm/callback/fix",
                 summary="按历史分析结果自动修复代码（异步执行），结果经修复通知卡片反馈",
                 dependencies=[Depends(inner_guard)])
-    def callback_fix(trace_id: str = Query(..., alias="traceId", description="告警链路 ID")) -> dict:
+    def callback_fix(request: Request,
+                     trace_id: str = Query(..., alias="traceId", description="告警链路 ID")) -> dict:
         log.info("收到飞书卡片修复回调, traceId=%s", trace_id)
         acceptance = container.fix_service.try_accept(trace_id)
         if not acceptance.accepted:
+            _audit("fix", trace_id, "rejected", request=request, detail=acceptance.message)
             return _fail(acceptance.message)
+        _audit("fix", trace_id, "accepted", request=request,
+               service=acceptance.result.service if acceptance.result else None,
+               from_status=acceptance.from_status)
 
         # 修复流程异步执行（LLM 生成分钟级），两把锁均由异步任务释放
         result, result_id = acceptance.result, acceptance.record_id
@@ -108,9 +128,12 @@ def build_router(container: Container) -> APIRouter:
     @router.get("/inner/feishu/alarm/callback/ignore",
                 summary="忽略告警（人工判定无需修复），后续点修复/忽略将提示已忽略/已修复",
                 dependencies=[Depends(inner_guard)])
-    def callback_ignore(trace_id: str = Query(..., alias="traceId", description="告警链路 ID")) -> dict:
+    def callback_ignore(request: Request,
+                        trace_id: str = Query(..., alias="traceId", description="告警链路 ID")) -> dict:
         log.info("收到飞书卡片忽略回调, traceId=%s", trace_id)
         ok, message = container.fix_service.try_ignore(trace_id)
+        _audit("ignore", trace_id, "accepted" if ok else "rejected",
+               request=request, detail=message)
         return _ok(True) if ok else _fail(message)
 
     # ------------------------------------------------------------------ 人工结案回调
@@ -118,10 +141,13 @@ def build_router(container: Container) -> APIRouter:
     @router.get("/inner/feishu/alarm/callback/resolve",
                 summary="人工结案（问题已由人工处理解决），落库 MANUAL_RESOLVED 终态并计入已解决",
                 dependencies=[Depends(inner_guard)])
-    def callback_resolve(trace_id: str = Query(..., alias="traceId", description="告警链路 ID"),
+    def callback_resolve(request: Request,
+                         trace_id: str = Query(..., alias="traceId", description="告警链路 ID"),
                          note: str = Query("", description="处理说明（可选）")) -> dict:
         log.info("收到飞书卡片结案回调, traceId=%s", trace_id)
         ok, message = container.fix_service.try_resolve(trace_id, note)
+        _audit("resolve", trace_id, "accepted" if ok else "rejected",
+               request=request, detail=message)
         return _ok(True) if ok else _fail(message)
 
     # ------------------------------------------------------------------ 告警看板

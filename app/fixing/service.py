@@ -121,6 +121,7 @@ class FixAcceptance:
     message: str
     result: AlarmAnalyseResult | None = None
     record_id: int | None = None
+    from_status: str | None = None  # 受理时的 fix_status（审计用）
 
 
 class FixService:
@@ -191,7 +192,8 @@ class FixService:
             return FixAcceptance(False, "该服务正在修复其他告警，请稍后再试")
 
         log.info("修复任务已提交异步执行, traceId=%s, service=%s", trace_id, service_key)
-        return FixAcceptance(True, "受理成功", result=result, record_id=record.id)
+        return FixAcceptance(True, "受理成功", result=result, record_id=record.id,
+                             from_status=record.fix_status)
 
     # ------------------------------------------------------------------ 执行（后台异步部分）
 
@@ -262,10 +264,26 @@ class FixService:
                         result_id, fix_status, truncate_chars(fix_summary or "-", 1000) or "-")
                 except Exception:  # noqa: BLE001
                     log.exception("修复结果落库失败, traceId=%s, fixStatus=%s", trace_id, fix_status)
+            self._audit(action="fix_result", trace_id=trace_id, outcome=fix_status,
+                        service=result.service, to_status=fix_status, detail=fix_summary)
             # 无论成败都释放执行锁与服务串行锁；失败不标记 done，允许用户重试
             self._store.release_lock(self._keys.fix_lock + trace_id)
             self._store.release_lock(self._keys.fix_service_lock + fix_service_key(result.service),
                                      expected_value=trace_id)
+
+    def _audit(self, action: str, trace_id: str, outcome: str,
+               service: str | None = None, from_status: str | None = None,
+               to_status: str | None = None, detail: str | None = None) -> None:
+        """服务层操作审计（尽力而为）：仓储缺 insert_audit（假仓储/旧实现）或写失败时只记日志。"""
+        audit = getattr(self._repository, "insert_audit", None) if self._repository else None
+        if audit is None:
+            return
+        try:
+            audit(action=action, trace_id=trace_id, outcome=outcome, service=service,
+                  from_status=from_status, to_status=to_status,
+                  detail=truncate_chars(detail or "-", 500) if detail else None)
+        except Exception:  # noqa: BLE001
+            log.exception("操作审计写入失败, action=%s, traceId=%s", action, trace_id)
 
     # ------------------------------------------------------------------ MR 合拢
 
@@ -348,6 +366,9 @@ class FixService:
         except Exception as exc:  # noqa: BLE001
             log.exception("忽略落库失败, traceId=%s", trace_id)
             return False, "忽略失败（落库异常），请稍后重试"
+        self._audit(action="ignore", trace_id=trace_id, outcome=FIX_STATUS_NOT_NEEDED,
+                    service=record.service_name, from_status=record.fix_status,
+                    to_status=FIX_STATUS_NOT_NEEDED)
         log.info("告警已忽略(原状态=%s), traceId=%s", record.fix_status, trace_id)
         return True, "已忽略（判定无需处理）"
 
@@ -386,6 +407,9 @@ class FixService:
         except Exception as exc:  # noqa: BLE001
             log.exception("结案落库失败, traceId=%s", trace_id)
             return False, "结案失败（落库异常），请稍后重试"
+        self._audit(action="resolve", trace_id=trace_id, outcome=FIX_STATUS_MANUAL_RESOLVED,
+                    service=record.service_name, from_status=record.fix_status,
+                    to_status=FIX_STATUS_MANUAL_RESOLVED, detail=summary)
         log.info("告警已人工结案(原状态=%s), traceId=%s", record.fix_status, trace_id)
         return True, "已结案（人工已解决）"
 

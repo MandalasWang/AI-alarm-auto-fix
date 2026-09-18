@@ -49,6 +49,7 @@ class FeishuConfig(StrictModel):
     default_card_template_id: str = ""
     jump_url: str = ""
     ignore_jump_url: str = ""  # 忽略按钮跳转地址前缀（callback/ignore?traceId=）；空则卡片不带 ignor_url 变量
+    resolve_jump_url: str = ""  # 结案按钮跳转地址前缀（callback/resolve?traceId=）；空则卡片不带 resolve_url 变量
     callback_token: str = ""
     inner_auth_token: str = ""
     redis_key_ttl_hours: int = 24
@@ -211,6 +212,10 @@ class DbConfig(StrictModel):
 class FixNotifyConfig(StrictModel):
     card_template_id: str = ""
     manual_card_template_id: str = ""  # 人工处理/转人工通知卡片模板 ID；空则发文本消息兜底
+    # 转人工催办：待人工/已转人工 超过 stale_hours 未处理即聚合群提醒（cron 空串关闭）
+    stale_hours: int = 48
+    stale_remind_cron: str = "20 10 * * *"  # 催办扫描时间（北京时间 cron）
+    stale_chat_ids: list[str] = Field(default_factory=list)  # 催办群；空则回退 feishu.default_chat_id
 
 
 class RepeatConfig(StrictModel):

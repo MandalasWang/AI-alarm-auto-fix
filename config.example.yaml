@@ -18,6 +18,7 @@ feishu:
   default_card_template_id: "AAqP6OIC5nvR3"   # 告警卡片模板 ID（模板变量见 README）
   jump_url: ""                          # 卡片「修复」按钮跳转地址前缀，如 https://host/inner/feishu/alarm/callback/fix?traceId=
   ignore_jump_url: ""                   # 卡片「忽略」按钮跳转地址前缀（callback/ignore?traceId=）；空则卡片不带 ignor_url 变量
+  resolve_jump_url: ""                  # 结案按钮跳转地址前缀（callback/resolve?traceId=）；空则卡片不带 resolve_url 变量（人工处理完成后回填「人工已解决」终态）
   callback_token: ""                    # 卡片交互回调校验 token；空则跳过校验（建议配置）
   inner_auth_token: ""                  # /inner/* 接口自定义鉴权头（xizhao_request_auth）期望值；空则不校验（与 Java 网关白名单行为一致）
   redis_key_ttl_hours: 24               # 分析结果缓存 TTL（小时）
@@ -92,6 +93,9 @@ analyse:
   fix_notify:
     card_template_id: "AAqPVdOld0o00"   # 修复结果通知卡片模板；空则发文本消息兜底
     manual_card_template_id: ""         # 人工处理/转人工通知卡片模板（DEPENDENCY/MANUAL_REQUIRED 时发送）；空则发文本兜底
+    stale_hours: 48                     # 转人工催办：待人工/已转人工超过此时长未处理即群提醒
+    stale_remind_cron: "20 10 * * *"    # 转人工催办扫描时间（北京时间 cron）；空串关闭催办
+    stale_chat_ids: []                  # 催办群列表；空则回退 feishu.default_chat_id
 
   repeat:                               # 重复告警/复发识别（按告警指纹判定）
     window_hours: 24                    # 指纹匹配回溯窗口（小时）；0 或负数关闭重复识别

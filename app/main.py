@@ -60,8 +60,9 @@ def _start_scheduler(container: Container):
     """APScheduler 启动定时任务（北京时间 cron），执行提交到分析线程池（LLM 分钟级，不占调度线程）。
 
     - 日报：daily_report.enabled 开启；
-    - 修复分支催办：git.mr.enabled 且 stale_remind_cron 非空。
-    两者都未启用则不启动调度线程。
+    - 修复分支催办：git.mr.enabled 且 stale_remind_cron 非空；
+    - 转人工催办：fix_notify.stale_remind_cron 非空。
+    全部未启用则不启动调度线程。
     """
     from apscheduler.schedulers.background import BackgroundScheduler
     from apscheduler.triggers.cron import CronTrigger
@@ -74,6 +75,9 @@ def _start_scheduler(container: Container):
     if analyse.git.mr.enabled and analyse.git.mr.stale_remind_cron.strip():
         jobs.append(("alarmFixMrStaleRemind", analyse.git.mr.stale_remind_cron,
                      container.mr_service.remind_stale))
+    if analyse.fix_notify.stale_remind_cron.strip():
+        jobs.append(("alarmManualStaleRemind", analyse.fix_notify.stale_remind_cron,
+                     container.fix_service.remind_stale_manual))
     if not jobs:
         return None
 

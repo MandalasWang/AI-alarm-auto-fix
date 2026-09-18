@@ -73,7 +73,7 @@ def test_build_daily_series_zero_filled():
                                 today=datetime(2026, 9, 17))
     assert [point["date"] for point in series] == ["2026-09-15", "2026-09-16", "2026-09-17"]
     assert series[0] == {"date": "2026-09-15", "total": 0, "fixed": 0, "fixed_by_time": 0,
-                         "repeated": 0, "not_needed": 0, "manual": 0}
+                         "repeated": 0, "not_needed": 0, "manual": 0, "manual_resolved": 0}
     assert series[1]["total"] == 3 and series[1]["repeated"] == 1
     assert series[1]["fixed"] == 1
     assert series[1]["not_needed"] == 1

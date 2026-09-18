@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS alarm_analyze_result
     `interface`     VARCHAR(100) NULL COMMENT '接口',
     create_time     DATETIME     NOT NULL COMMENT '创建时间',
     update_time     TIMESTAMP    NULL COMMENT '更新时间',
-    fix_status      VARCHAR(20)  NULL COMMENT '修复状态：FIXED-已修复；NOT_NEEDED-无需修复(非代码问题)；FAILED-修复失败；NULL-未发起',
+    fix_status      VARCHAR(20)  NULL COMMENT '修复状态：FIXED-已修复；NOT_NEEDED-无需修复(非代码问题)；FAILED-修复失败；HANDOVER-已转人工；MANUAL_PENDING-待人工；MANUAL_RESOLVED-人工已解决；NULL-未发起',
     fix_summary     VARCHAR(1024) NULL COMMENT '修复说明（commit message 原文或无需修复原因）',
     fix_time        DATETIME     NULL COMMENT '修复结果时间',
     problem_type    VARCHAR(32)  NULL COMMENT '问题归因：CODE/DEPENDENCY/MANUAL_REQUIRED/NOT_A_PROBLEM；NULL-未归因',

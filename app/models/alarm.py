@@ -71,6 +71,9 @@ class AlarmAnalyseResult(ApiModel):
     fingerprint: str | None = None     # md5(service|requestUri|exceptionClass|首个业务帧)
     repeat_type: str | None = None     # NORMAL/REPEATED/RECURRED
     root_id: int | None = None         # 首次出现记录 id（REPEATED/RECURRED 非空）
+    # 复发时原修复的处理摘要（分支/commit/MR 链接，取自原告警 fix_summary），
+    # 卡片 recurred_fix_summary 变量下发，评审人可直接核对原修复为什么没生效
+    recurred_fix_summary: str | None = None
 
     def to_json(self) -> str:
         return self.model_dump_json(by_alias=True, exclude_none=True)

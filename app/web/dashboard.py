@@ -45,6 +45,7 @@ _REPEAT_LABELS = {"NORMAL": "首次", "REPEATED": "重复", "RECURRED": "复发"
 _MR_URL_PATTERN = re.compile(r"MR:\s*(https?://\S+)")
 _COMMIT_URL_PATTERN = re.compile(r"查看改动:\s*(https?://\S+)")
 _COMMIT_ID_PATTERN = re.compile(r"commit:\s*([0-9a-f]{7,40})", re.IGNORECASE)
+_BRANCH_LINE_PATTERN = re.compile(r"分支:\s*(\S+)")
 
 
 def _ok(data: object = True) -> dict:
@@ -86,6 +87,18 @@ def parse_commit_id(fix_summary: str | None) -> str | None:
     return match.group(1) if match else None
 
 
+def parse_branch_name(fix_summary: str | None) -> str | None:
+    """从 fix_summary 的「分支: <name>」行解析实际 fix 分支名。
+
+    撞分支重试后分支名带时分秒后缀，按 traceId+时间重算不可靠，故优先读落库的实际分支；
+    旧记录（该行存在前）返回 None，回退重算。
+    """
+    if not fix_summary:
+        return None
+    match = _BRANCH_LINE_PATTERN.search(fix_summary)
+    return match.group(1) if match else None
+
+
 def window_start(days: int, now: datetime | None = None) -> datetime:
     """统计窗口起点：N 天前的零点（含当天，如 days=14 覆盖今天与前 13 天）。"""
     moment = now or datetime.now()
@@ -93,21 +106,22 @@ def window_start(days: int, now: datetime | None = None) -> datetime:
 
 
 def resolve_rate(total: int, fixed: int, not_needed: int,
-                 manual: int = 0, repeated: int = 0) -> float | None:
-    """解决率口径与日报一致：已解决 / (告警总数 − 无需处理 − 转人工 − 待人工 − 重复)。
+                 manual: int = 0, repeated: int = 0, manual_resolved: int = 0) -> float | None:
+    """解决率口径与日报一致：(AI修复+人工解决) / (告警总数 − 无需处理 − 转人工 − 待人工 − 重复)。
 
+    人工已解决（MANUAL_RESOLVED）是真实解决，计入分子、留在分母；
     重复只剔除 REPEATED（复发 RECURRED 是新问题，保留在分母）；分母非正返回 None（不展示）。
     """
     denominator = total - not_needed - manual - repeated
     if denominator <= 0:
         return None
-    return round(fixed / denominator * 100, 1)
+    return round((fixed + manual_resolved) / denominator * 100, 1)
 
 
 def build_daily_series(start: datetime, aggregates: dict,
                        today: datetime | None = None) -> list[dict]:
     """零填充每日序列：date / total(按创建日新增) / fixed_by_time(按修复日解决) / repeated /
-    not_needed / manual（后两者供「当日解决率」按日报口径剔除）。"""
+    not_needed / manual / manual_resolved（后三者供「当日解决率」按日报口径剔除或计入）。"""
     daily = aggregates.get("daily") or {}
     daily_fixed = aggregates.get("daily_fixed") or {}
     day, last = start.date(), (today or datetime.now()).date()
@@ -121,7 +135,8 @@ def build_daily_series(start: datetime, aggregates: dict,
                        "fixed_by_time": daily_fixed.get(key, 0),  # 当日完成修复的（含此前创建）
                        "repeated": bucket.get("repeated", 0),
                        "not_needed": bucket.get("not_needed", 0),
-                       "manual": bucket.get("manual", 0)})
+                       "manual": bucket.get("manual", 0),
+                       "manual_resolved": bucket.get("manual_resolved", 0)})
         day += timedelta(days=1)
     return series
 
@@ -202,8 +217,12 @@ class MergeStateResolver:
 
     def resolve(self, service: str | None, trace_id: str | None, fix_time: datetime | None,
                 fix_summary: str | None) -> dict:
-        """解析一条已修复记录的合并状态；返回值字段见 _base_state。"""
-        branch = build_branch_name(trace_id, fix_time)
+        """解析一条已修复记录的合并状态；返回值字段见 _base_state。
+
+        分支名优先读 fix_summary 落库的「分支: x」行（撞分支重试后名字带后缀，重算不可靠），
+        旧记录缺失时回退按 traceId+修复时间重算。
+        """
+        branch = parse_branch_name(fix_summary) or build_branch_name(trace_id, fix_time)
         commit_id = parse_commit_id(fix_summary)
         base = {
             "branch": branch, "commit_id": commit_id, "commit_url": parse_commit_url(fix_summary),
@@ -310,7 +329,8 @@ def build_overview(repository: AlarmRepository, resolver: MergeStateResolver, en
             "fixed_by_time": today_bucket["fixed_by_time"],
             "rate": resolve_rate(today_bucket["total"], today_bucket["fixed"],
                                  today_bucket["not_needed"], today_bucket["manual"],
-                                 today_bucket["repeated"]),
+                                 today_bucket["repeated"],
+                                 today_bucket.get("manual_resolved", 0)),
         }
 
     return {
@@ -325,9 +345,11 @@ def build_overview(repository: AlarmRepository, resolver: MergeStateResolver, en
             "failed": status.get("FAILED", 0),
             "pending": status.get(_NULL_KEY, 0),
             "manual": manual,
+            "manual_resolved": status.get("MANUAL_RESOLVED", 0),
             "repeated": repeat.get("REPEATED", 0) + repeat.get("RECURRED", 0),
             "resolve_rate": resolve_rate(total, fixed, not_needed,
-                                         manual, repeat.get("REPEATED", 0)),
+                                         manual, repeat.get("REPEATED", 0),
+                                         status.get("MANUAL_RESOLVED", 0)),
             "merged": merged,
             "merge_open": merge_open,
             "merge_checked": merge_checked,
@@ -553,5 +575,5 @@ def build_dashboard_router(container: Container) -> APIRouter:
 
 
 __all__ = ["build_dashboard_router", "build_daily_series", "build_overview",
-           "build_weekly_series", "parse_commit_id", "parse_commit_url", "parse_mr_url",
-           "resolve_rate", "window_start", "MergeStateResolver"]
+           "build_weekly_series", "parse_branch_name", "parse_commit_id", "parse_commit_url",
+           "parse_mr_url", "resolve_rate", "window_start", "MergeStateResolver"]

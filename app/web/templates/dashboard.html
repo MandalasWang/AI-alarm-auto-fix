@@ -139,6 +139,7 @@
   .b-FAILED      { background: rgba(248, 113, 113, .12); color: var(--red); border-color: rgba(248, 113, 113, .32); }
   .b-MANUAL_PENDING { background: rgba(251, 191, 36, .12); color: var(--orange); border-color: rgba(251, 191, 36, .3); }
   .b-HANDOVER    { background: rgba(167, 139, 250, .12); color: var(--purple); border-color: rgba(167, 139, 250, .3); }
+  .b-MANUAL_RESOLVED { background: rgba(45, 212, 191, .12); color: #2dd4bf; border-color: rgba(45, 212, 191, .3); }
   .b-NULL        { background: rgba(100, 116, 139, .14); color: #94a3b8; border-color: rgba(100, 116, 139, .3); }
   .b-merged      { background: rgba(52, 211, 153, .12); color: var(--green); border-color: rgba(52, 211, 153, .3); }
   .b-open        { background: rgba(91, 140, 255, .12); color: #8fb0ff; border-color: rgba(91, 140, 255, .3); }
@@ -313,6 +314,7 @@
         <option value="FAILED">修复失败</option>
         <option value="MANUAL_PENDING">待人工处理</option>
         <option value="HANDOVER">已转人工排查</option>
+        <option value="MANUAL_RESOLVED">人工已解决</option>
       </select>
       <input type="search" id="f-q" placeholder="搜 traceId / 接口">
       <span class="muted small" id="list-hint"></span>
@@ -336,7 +338,7 @@
   </section>
 
   <p class="muted small">
-    数据来源：alarm_analyze_result（只读）· 解决率口径与日报一致（剔除无需处理/转人工/待人工/重复）·
+    数据来源：alarm_analyze_result（只读）· 解决率口径与日报一致（剔除无需处理/转人工/待人工/重复，人工已解决计入解决数）·
     合并状态以 commit 对比 GitLab 为准（MR 状态兜底，结果缓存 5 分钟）
   </p>
 </main>
@@ -399,6 +401,7 @@ function renderKpis(data) {
     kpiCard("修复失败", k.failed, "", k.failed > 0 ? "c-red" : ""),
     kpiCard("待人工", k.manual, "", k.manual > 0 ? "c-orange" : ""),
     kpiCard("无需处理", k.not_needed, ""),
+    kpiCard("人工已解决", k.manual_resolved ?? "", ""),
     kpiCard("已合并", k.merged,
       k.merge_checked ? `${k.merge_rate}% · 已查 ${k.merge_checked} 条` : "GitLab 未查", "c-blue"),
   ];
@@ -515,7 +518,7 @@ function renderTrend(series) {
 /* ---------------- 环形图（SVG 分段，悬浮高亮 + 中心联动） ---------------- */
 
 const STATUS_COLORS = { FIXED: "#34d399", NOT_NEEDED: "#64748b", FAILED: "#f87171",
-  MANUAL_PENDING: "#fbbf24", HANDOVER: "#a78bfa", NULL: "#475569" };
+  MANUAL_PENDING: "#fbbf24", HANDOVER: "#a78bfa", MANUAL_RESOLVED: "#2dd4bf", NULL: "#475569" };
 
 function renderStatusDonut(rows) {
   const el = $("#overview-donut");

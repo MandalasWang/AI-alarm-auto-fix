@@ -26,6 +26,8 @@ _PARAM_MAX_BYTES = 2 * 1024
 _REPORT_SECTION_MAX_BYTES = 6 * 1024
 #: 发送内容目标上限：30KB 硬限制留 2KB 余量（含 JSON 结构与模板包装开销）
 _CARD_TARGET_MAX_BYTES = 28 * 1024
+#: 复发卡片「原修复摘要」字节预算（commit/MR 链接足够，不与主内容争预算）
+_RECURRED_SUMMARY_MAX_BYTES = 1024
 #: 削减时字段保留的字节下限，防止预算无限减半
 _TRIM_FLOOR_BYTES = 256
 _STACK_OMITTED_TEXT = "(堆栈过长已省略，完整堆栈见告警日志)"
@@ -44,12 +46,13 @@ def _card_text(value: str | None, max_bytes: int, default: str | None) -> str:
 
 
 def build_alarm_card(result: AlarmAnalyseResult, template_id: str, jump_url: str,
-                     ignore_jump_url: str = "") -> dict:
+                     ignore_jump_url: str = "", resolve_jump_url: str = "") -> dict:
     """构建告警模板卡片。
 
-    url/ignor_url 变量为分端差异化链接对象（模板 Url 类型），传字符串会报 200732 类型不一致；
-    非 http 开头的完整链接会被飞书拒绝（200737），jump_url 未配置时保持空串交由模板兜底；
-    ignore_jump_url 未配置时不输出 ignor_url 变量（模板可不加忽略按钮），旧模板未引用的变量自动忽略。
+    url/ignor_url/resolve_url 变量为分端差异化链接对象（模板 Url 类型），传字符串会报 200732
+    类型不一致；非 http 开头的完整链接会被飞书拒绝（200737），jump_url 未配置时保持空串交由
+    模板兜底；ignore/resolve_jump_url 未配置时不输出对应变量（模板可不加按钮），旧模板未引用
+    的变量自动忽略。
     """
     variables: dict = {
         "title": _card_text(result.title, _SHORT_FIELD_MAX_BYTES, "系统告警"),
@@ -77,12 +80,21 @@ def build_alarm_card(result: AlarmAnalyseResult, template_id: str, jump_url: str
         ignore_url = ignore_jump_url + (result.trace_id or "")
         variables["ignor_url"] = {"url": ignore_url, "pc_url": ignore_url}
 
+    # 结案按钮链接：配置 resolve_jump_url 后输出 resolve_url（人工处理完成点「已解决」回填终态）
+    if resolve_jump_url:
+        resolve_url = resolve_jump_url + (result.trace_id or "")
+        variables["resolve_url"] = {"url": resolve_url, "pc_url": resolve_url}
+
     # 归因/复发标注：repeat_label 仅复发时输出（重复告警不推卡片）
     variables["problem_type"] = _card_text(problem_type_label(result.problem_type),
                                            _SHORT_FIELD_MAX_BYTES, _PLACEHOLDER)
     variables["root_id"] = "" if result.root_id is None else str(result.root_id)
     if result.repeat_type == REPEAT_RECURRED:
         variables["repeat_label"] = "⚠️ 修复后复发"
+        # 原修复的处理摘要（分支/commit/MR 链接），便于直接核对原修复为何未生效
+        if result.recurred_fix_summary:
+            variables["recurred_fix_summary"] = _card_text(
+                result.recurred_fix_summary, _RECURRED_SUMMARY_MAX_BYTES, _PLACEHOLDER)
 
     card = build_template_card(template_id, variables)
     _enforce_card_budget(card, variables, result)

@@ -19,6 +19,7 @@ from app.core.fingerprint import (
     decide_repeat_type, fingerprint, fix_status_of_problem_type,
 )
 from app.core.kv import KeyValueStore
+from app.core.text import truncate_chars
 from app.extractors.stack import class_name_to_path, find_exception_class, parse_business_frames
 from app.extractors.tables import extract_tables
 from app.feishu.cards import (
@@ -87,6 +88,9 @@ class AlarmAnalyseService:
             result.repeat_type = decide_repeat_type(prior, datetime.now())
             # 链到真根：原告警自身也是重复时沿用其根，避免链式增长
             result.root_id = prior.root_id if prior.root_id is not None else prior.id
+            # 复发时携带原修复的处理摘要（分支/commit/MR），卡片可直链核对原修复为何未生效
+            if result.repeat_type == REPEAT_RECURRED and prior.fix_summary:
+                result.recurred_fix_summary = truncate_chars(prior.fix_summary, 500)
         if result.repeat_type == REPEAT_REPEATED:
             # 继承原告警归因（已判过的结论沿用），落库计数后直接返回：不推卡片、不发通知、不调 LLM
             result.problem_type = prior.problem_type
@@ -122,7 +126,8 @@ class AlarmAnalyseService:
 
         # 8. 构建卡片并发送
         card = build_alarm_card(result, template_id, self._config.feishu.jump_url,
-                                self._config.feishu.ignore_jump_url)
+                                self._config.feishu.ignore_jump_url,
+                                self._config.feishu.resolve_jump_url)
         log.info("推送飞书告警卡片, service=%s, level=%s, chatId=%s",
                  result.service, result.level, chat_id)
         message_id = self._feishu.send_card_to_chat(chat_id, card)
@@ -177,6 +182,11 @@ class AlarmAnalyseService:
                 handover_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 steps=steps,
             )
+            # 结案按钮链接（feishu.resolve_jump_url 配置后下发 resolve_url 变量）
+            resolve_jump = self._config.feishu.resolve_jump_url or ""
+            if resolve_jump:
+                resolve_url = resolve_jump + (result.trace_id or "")
+                variables["resolve_url"] = {"url": resolve_url, "pc_url": resolve_url}
             template_id = self._config.analyse.fix_notify.manual_card_template_id
             if template_id:
                 self._feishu.send_card_to_chat(chat_id, build_template_card(template_id, variables))

@@ -241,7 +241,8 @@ class AlarmRepository:
                     "SELECT DATE(create_time) AS d, COUNT(*) AS total,"
                     " SUM(fix_status = 'FIXED') AS fixed, SUM(repeat_type = 'REPEATED') AS repeated,"
                     " SUM(fix_status = 'NOT_NEEDED') AS not_needed,"
-                    " SUM(fix_status IN ('HANDOVER', 'MANUAL_PENDING')) AS manual"
+                    " SUM(fix_status IN ('HANDOVER', 'MANUAL_PENDING')) AS manual,"
+                    " SUM(fix_status = 'MANUAL_RESOLVED') AS manual_resolved"
                     f" FROM alarm_analyze_result {daily_filters} GROUP BY d ORDER BY d",
                     daily_args,
                 )
@@ -249,7 +250,8 @@ class AlarmRepository:
                                                 "fixed": int(row["fixed"] or 0),
                                                 "repeated": int(row["repeated"] or 0),
                                                 "not_needed": int(row["not_needed"] or 0),
-                                                "manual": int(row["manual"] or 0)}
+                                                "manual": int(row["manual"] or 0),
+                                                "manual_resolved": int(row["manual_resolved"] or 0)}
                          for row in cursor.fetchall()}
                 cursor.execute(
                     "SELECT DATE(fix_time) AS d, COUNT(*) AS c FROM alarm_analyze_result"
@@ -314,6 +316,24 @@ class AlarmRepository:
                     " WHERE fix_status = 'FIXED' AND fix_time IS NOT NULL AND fix_time >= %s"
                     " ORDER BY fix_time DESC LIMIT %s",
                     (start, limit),
+                )
+                rows = cursor.fetchall()
+        return [_to_record(row) for row in rows]
+
+    def list_stale_manual(self, before: datetime, limit: int = 200) -> list[AlarmAnalyzeRecord]:
+        """截止时间前仍未完结的 待人工/已转人工 记录（转人工催办扫描用，按等待起点升序）。
+
+        等待起点 = COALESCE(fix_time, create_time)：执行修复判 manual 的有 fix_time，
+        分析归因即转人工的只有 create_time。量级小，COALESCE 不走索引可接受。
+        """
+        with self._connect() as connection:
+            with connection.cursor(pymysql.cursors.DictCursor) as cursor:
+                cursor.execute(
+                    f"SELECT {self._LIST_COLUMNS} FROM alarm_analyze_result"
+                    " WHERE fix_status IN ('MANUAL_PENDING', 'HANDOVER')"
+                    " AND COALESCE(fix_time, create_time) < %s"
+                    " ORDER BY COALESCE(fix_time, create_time) ASC LIMIT %s",
+                    (before, limit),
                 )
                 rows = cursor.fetchall()
         return [_to_record(row) for row in rows]

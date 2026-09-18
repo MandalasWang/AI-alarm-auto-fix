@@ -39,6 +39,7 @@ FIX_STATUS_FIXED = "FIXED"
 FIX_STATUS_NOT_NEEDED = "NOT_NEEDED"
 FIX_STATUS_HANDOVER = "HANDOVER"
 FIX_STATUS_MANUAL_PENDING = "MANUAL_PENDING"
+FIX_STATUS_MANUAL_RESOLVED = "MANUAL_RESOLVED"  # 人工已处理解决（结案终态）
 
 _PROBLEM_TYPE_LABELS = {
     PROBLEM_CODE: "代码问题",
@@ -76,13 +77,13 @@ def first_business_frame(stack_trace: str | None) -> str | None:
 def decide_repeat_type(prior: "AlarmAnalyzeRecord | None", now: datetime) -> str:
     """重复类型判定（纯决策）：无原告警 → NORMAL；
 
-    原告警已修复（FIXED 且修复时间已过）→ RECURRED，说明修复无效；
-    其余（未发起/失败/无需处理/转人工/待人工）→ REPEATED。
+    原告警已解决（AI 修复 FIXED 或人工解决 MANUAL_RESOLVED，且解决时间已过）→ RECURRED，
+    说明修复/处理无效；其余（未发起/失败/无需处理/转人工/待人工）→ REPEATED。
     """
     if prior is None:
         return REPEAT_NORMAL
-    if (prior.fix_status == FIX_STATUS_FIXED
-            and prior.fix_time is not None and now >= prior.fix_time):
+    resolved = prior.fix_status in (FIX_STATUS_FIXED, FIX_STATUS_MANUAL_RESOLVED)
+    if resolved and prior.fix_time is not None and now >= prior.fix_time:
         return REPEAT_RECURRED
     return REPEAT_REPEATED
 
@@ -110,6 +111,7 @@ __all__ = [
     "PROBLEM_CODE", "PROBLEM_DEPENDENCY", "PROBLEM_MANUAL_REQUIRED", "PROBLEM_NOT_A_PROBLEM",
     "REPEAT_NORMAL", "REPEAT_REPEATED", "REPEAT_RECURRED",
     "FIX_STATUS_FIXED", "FIX_STATUS_NOT_NEEDED", "FIX_STATUS_HANDOVER", "FIX_STATUS_MANUAL_PENDING",
+    "FIX_STATUS_MANUAL_RESOLVED",
     "fingerprint", "first_business_frame", "decide_repeat_type",
     "fix_status_of_problem_type", "problem_type_label",
 ]

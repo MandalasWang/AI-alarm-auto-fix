@@ -1,9 +1,10 @@
-"""HTTP 接口层：告警接收、修复回调、忽略回调、卡片交互回调。
+"""HTTP 接口层：告警接收、修复回调、忽略回调、人工结案回调、卡片交互回调。
 
 与 Java 版接口契约对齐（路径、参数名、响应语义）：
 - POST /inner/feishu/alarm/receive          接收告警，异步分析后推送群卡片
 - GET  /inner/feishu/alarm/callback/fix     卡片「修复」按钮跳转：按 traceId 自动修复（异步）
 - GET  /inner/feishu/alarm/callback/ignore  卡片「忽略」按钮跳转：按 traceId 忽略告警（人工判定无需修复）
+- GET  /inner/feishu/alarm/callback/resolve 卡片「已解决」按钮跳转：按 traceId 人工结案（新增，Java 版无）
 - POST /feishu/alarm/callback               飞书卡片交互回调（confirm/ignore）
 - GET  /healthz                             探活
 
@@ -103,6 +104,17 @@ def build_router(container: Container) -> APIRouter:
     def callback_ignore(trace_id: str = Query(..., alias="traceId", description="告警链路 ID")) -> dict:
         log.info("收到飞书卡片忽略回调, traceId=%s", trace_id)
         ok, message = container.fix_service.try_ignore(trace_id)
+        return _ok(True) if ok else _fail(message)
+
+    # ------------------------------------------------------------------ 人工结案回调
+
+    @router.get("/inner/feishu/alarm/callback/resolve",
+                summary="人工结案（问题已由人工处理解决），落库 MANUAL_RESOLVED 终态并计入已解决",
+                dependencies=[Depends(inner_guard)])
+    def callback_resolve(trace_id: str = Query(..., alias="traceId", description="告警链路 ID"),
+                         note: str = Query("", description="处理说明（可选）")) -> dict:
+        log.info("收到飞书卡片结案回调, traceId=%s", trace_id)
+        ok, message = container.fix_service.try_resolve(trace_id, note)
         return _ok(True) if ok else _fail(message)
 
     # ------------------------------------------------------------------ 告警看板

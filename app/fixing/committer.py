@@ -51,12 +51,31 @@ class FixCommitter:
 
     def commit_fix(self, service: str, file_path: str, file_content: str, commit_message: str,
                    base_branch: str | None, trace_id: str | None) -> CommitResult | None:
-        """在 fix 分支上提交修复文件；失败返回 None。"""
+        """在 fix 分支上提交修复文件；失败返回 None。
+
+        同日重试场景：上一轮 FAILED 的 fix 分支已 push 到远端，网关从基线重建同名分支再 push
+        会被 non-fast-forward 拒绝 → 整体提交失败。因此首轮失败后自动换带时分秒后缀的新分支名
+        重试一次（failed: fix_bug_xxx → fix_bug_xxx_HHMMSS），保证「FAILED 可重试」的承诺成立；
+        实际分支名随 fix_summary 落库，看板合并状态按它解析。
+        """
         git = self._config.analyse.git
         message = f"{AI_COMMIT_PREFIX} {(commit_message or '').strip()}"
-        branch = build_branch_name(trace_id)
         ref = base_branch or git.fix_base_branch or "prod"
 
+        branch = build_branch_name(trace_id)
+        result = self._commit_once(service, branch, ref, file_path, file_content, message)
+        if result is not None:
+            return result
+
+        retry_branch = f"{branch}_{datetime.now():%H%M%S}"
+        log.warning("修复提交失败，更换分支名重试一次, service=%s, branch=%s -> %s",
+                    service, branch, retry_branch)
+        return self._commit_once(service, retry_branch, ref, file_path, file_content, message)
+
+    def _commit_once(self, service: str, branch: str, ref: str, file_path: str,
+                     file_content: str, message: str) -> CommitResult | None:
+        """单次提交尝试：网关优先（本地 workspace 提交并 push），失败降级 GitLab API 直连。"""
+        git = self._config.analyse.git
         # 网关优先：在网关本地 workspace 提交并 push
         if self._gateway.commit_available:
             via_gateway = self._gateway.commit_fix(service, branch, ref, file_path, file_content, message)

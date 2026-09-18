@@ -2,8 +2,8 @@
 纯函数与飞书卡片推送，对应 Java 版 `AlarmStatsSupport`，保证两份报表数字一致。
 
 统计口径：错误告警=区间内 alarm_analyze_result 记录数；修复通知=fix_status 已判定数（含转人工/待人工）；
-修复成功率=成功/(错误告警-无需处理-转人工-待人工-重复)，非自动修复项剔除出分母（重复剔除防刷屏稀释），
-分母为 0 且有告警记 100%，无告警记 0% 不展示。
+解决率=(AI修复+人工解决)/(错误告警-无需处理-转人工-待人工-重复)，非自动修复项剔除出分母
+（重复剔除防刷屏稀释；人工已解决计入分子、留在分母），分母为 0 且有告警记 100%，无告警记 0% 不展示。
 """
 from __future__ import annotations
 
@@ -28,7 +28,8 @@ MINOR_SEPARATOR = "———————"
 
 @dataclass
 class PeriodStats:
-    """告警周期统计。修复成功率 = 成功/(错误告警-无需处理-转人工-待人工-重复)，非自动修复项剔除出分母。"""
+    """告警周期统计。解决率 = (AI修复+人工解决)/(错误告警-无需处理-转人工-待人工-重复)，
+    非自动修复项剔除出分母（人工已解决计入分子、留在分母）。"""
 
     total: int = 0
     fix_notified: int = 0
@@ -37,13 +38,14 @@ class PeriodStats:
     not_needed: int = 0
     handover: int = 0        # 已转人工排查数（上下游依赖问题）
     manual_pending: int = 0  # 待人工处理数（SQL/配置等需人工介入）
+    manual_resolved: int = 0  # 人工已解决数（结案终态，计入已解决）
     repeated: int = 0        # 重复告警数（窗口内同指纹，已压卡片）
     recurred: int = 0        # 修复后复发数
     success_rate: float = 0.0
 
 
 def stats_of(rows) -> PeriodStats:
-    """周期统计：fix_status 五态计数 + 重复/复发计数 + 成功率。"""
+    """周期统计：fix_status 六态计数 + 重复/复发计数 + 成功率。"""
     stats = PeriodStats(total=len(rows))
     for row in rows:
         status = row.fix_status
@@ -57,26 +59,30 @@ def stats_of(rows) -> PeriodStats:
             stats.handover += 1
         elif status == "MANUAL_PENDING":
             stats.manual_pending += 1
+        elif status == "MANUAL_RESOLVED":
+            stats.manual_resolved += 1
         if row.repeat_type == REPEAT_REPEATED:
             stats.repeated += 1
         elif row.repeat_type == REPEAT_RECURRED:
             stats.recurred += 1
     stats.fix_notified = (stats.fixed + stats.failed + stats.not_needed
                           + stats.handover + stats.manual_pending)
-    # 修复成功率=成功/(错误告警-无需处理-转人工-待人工-重复)，非自动修复项剔除出分母
-    # （重复告警不是独立问题，留在分母会被刷屏告警稀释成功率）；分母为 0 且有告警即无可自动修复项，
-    # 零失败记 100（记 0 会误读为全部修复失败）；无告警时该期不展示成功率，记 0
+    # 解决率=(AI修复+人工解决)/(错误告警-无需处理-转人工-待人工-重复)：非自动修复项剔除出分母
+    # （重复告警不是独立问题，留在分母会被刷屏告警稀释成功率）；人工已解决是真实解决，计入分子、
+    # 留在分母。分母为 0 且有告警即无可自动修复项，零失败记 100（记 0 会误读为全部修复失败）；
+    # 无告警时该期不展示成功率，记 0
     rate_base = (stats.total - stats.not_needed - stats.handover
                  - stats.manual_pending - stats.repeated)
     if rate_base > 0:
-        stats.success_rate = stats.fixed * 100.0 / rate_base
+        stats.success_rate = (stats.fixed + stats.manual_resolved) * 100.0 / rate_base
     else:
         stats.success_rate = 100.0 if stats.total > 0 else 0.0
     return stats
 
 
 def stats_line(stats: PeriodStats) -> str:
-    """首行告警/修复通知/成功/失败/成功率；次行仅展示非零的重复/复发/无需修复/转人工/待人工段。
+    """首行告警/修复通知/成功/失败/成功率；
+    次行仅展示非零的 重复/复发/无需修复/转人工/待人工/人工解决 段。
 
     该期无告警时只展示「错误告警 0 条」。
     """
@@ -89,7 +95,8 @@ def stats_line(stats: PeriodStats) -> str:
              f"↩️ 复发 {stats.recurred} 条" if stats.recurred else None,
              f"🚫 无需修复 {stats.not_needed} 条" if stats.not_needed else None,
              f"👥 转人工 {stats.handover} 条" if stats.handover else None,
-             f"⏳ 待人工 {stats.manual_pending} 条" if stats.manual_pending else None]
+             f"⏳ 待人工 {stats.manual_pending} 条" if stats.manual_pending else None,
+             f"🛠 人工解决 {stats.manual_resolved} 条" if stats.manual_resolved else None]
     segments = [seg for seg in extra if seg]
     return first + ("\n" + "・".join(segments) if segments else "")
 
@@ -136,7 +143,8 @@ def fix_status_label(fix_status: str | None) -> str:
     if fix_status is None:
         return "暂无修复通知"
     return {"FIXED": "已修复", "NOT_NEEDED": "无需修复", "FAILED": "失败",
-            "HANDOVER": "已转人工", "MANUAL_PENDING": "待人工处理"}.get(fix_status, fix_status)
+            "HANDOVER": "已转人工", "MANUAL_PENDING": "待人工处理",
+            "MANUAL_RESOLVED": "人工已解决"}.get(fix_status, fix_status)
 
 
 def repeat_marker(repeat_type: str | None) -> str:

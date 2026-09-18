@@ -1,11 +1,12 @@
-"""修复执行服务：LLM 生成修复 → 提交 fix 分支 → 群发结果通知 → 结果落库（含忽略）。
+"""修复执行服务：LLM 生成修复 → 提交 fix 分支 → 群发结果通知 → 结果落库（含忽略/人工结案）。
 
 修复状态（落库 alarm_analyze_result.fix_status，效果看板统计用）：
-- FIXED          已提交修复 commit（永久防重，不允许再次修复）
-- NOT_NEEDED     确认无需任何处理（LLM 判定 non_code 或人工忽略），不计为失败（永久防重）
-- MANUAL_PENDING 待人工处理（SQL 变更/配置/权限等，附操作步骤），永久防重
-- HANDOVER       已转人工排查（上下游依赖问题，分析归因落库即定），永久防重
-- FAILED         失败（生成/提交/执行异常），不标记完结，允许重试
+- FIXED           已提交修复 commit（永久防重，不允许再次修复）
+- NOT_NEEDED      确认无需任何处理（LLM 判定 non_code 或人工忽略），不计为失败（永久防重）
+- MANUAL_PENDING  待人工处理（SQL 变更/配置/权限等，附操作步骤），永久防重
+- HANDOVER        已转人工排查（上下游依赖问题，分析归因落库即定），永久防重
+- MANUAL_RESOLVED 人工已处理解决（结案终态，try_ignore 同款防重；统计计入已解决）
+- FAILED          失败（生成/提交/执行异常），不标记完结，允许重试
 
 并发语义（Redis 两把锁，均由异步任务 finally 释放）：
 - 执行锁 fix:lock:<traceId>（10min）：防同告警双击/并发触发两轮 LLM 生成；
@@ -16,12 +17,13 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from app.config import Keys
 from app.core import metrics
 from app.core.fingerprint import (
-    FIX_STATUS_HANDOVER, FIX_STATUS_MANUAL_PENDING, FIX_STATUS_NOT_NEEDED,
+    FIX_STATUS_HANDOVER, FIX_STATUS_MANUAL_PENDING, FIX_STATUS_MANUAL_RESOLVED,
+    FIX_STATUS_NOT_NEEDED,
 )
 from app.core.kv import KeyValueStore
 from app.core.text import truncate_chars
@@ -30,9 +32,10 @@ from app.feishu.cards import (
     build_manual_notify_variables, build_template_card,
 )
 from app.feishu.client import FeishuClient
-from app.fixing.committer import FixCommitter
+from app.fixing.committer import CommitResult, FixCommitter
 from app.fixing.generator import FixGenerator, FixOutput
 from app.models.alarm import AlarmAnalyseResult
+from app.reporting import stats
 from app.storage.alarm_repository import AlarmRepository
 
 log = logging.getLogger(__name__)
@@ -40,7 +43,7 @@ log = logging.getLogger(__name__)
 FIX_STATUS_FIXED = "FIXED"
 FIX_STATUS_FAILED = "FAILED"
 FIX_TYPE_MANUAL = "manual"
-# NOT_NEEDED / HANDOVER / MANUAL_PENDING 由 app.core.fingerprint 导入（同值单一来源）
+# NOT_NEEDED / HANDOVER / MANUAL_PENDING / MANUAL_RESOLVED 由 app.core.fingerprint 导入（同值单一来源）
 
 #: 执行锁 TTL：需覆盖一轮 LLM 生成（分钟级）
 EXEC_LOCK_TTL_SECONDS = 10 * 60
@@ -55,6 +58,7 @@ _FIX_STATUS_LABELS = {
     FIX_STATUS_FAILED: "未修复",
     FIX_STATUS_HANDOVER: "已转人工排查",
     FIX_STATUS_MANUAL_PENDING: "待人工处理",
+    FIX_STATUS_MANUAL_RESOLVED: "人工已解决",
 }
 
 _DONE_REJECT_MESSAGES = {
@@ -62,13 +66,16 @@ _DONE_REJECT_MESSAGES = {
     FIX_STATUS_HANDOVER: "该告警已转人工排查（上下游依赖问题），请勿重复点击",
     FIX_STATUS_MANUAL_PENDING: "该告警已转人工处理，请勿重复点击",
     FIX_STATUS_FIXED: "该告警已成功修复，请勿重复点击",
+    FIX_STATUS_MANUAL_RESOLVED: "该告警已由人工处理解决，请勿重复点击",
 }
 
 
 def is_done_status(fix_status: str | None) -> bool:
-    """告警是否已完结（终态，修复/忽略均不再受理）：已修复/已忽略(无需处理)/已转人工/待人工。"""
+    """告警是否已完结（终态，修复/忽略/结案均不再受理）：
+    已修复/已忽略(无需处理)/已转人工/待人工/人工已解决。"""
     return fix_status in (FIX_STATUS_FIXED, FIX_STATUS_NOT_NEEDED,
-                          FIX_STATUS_HANDOVER, FIX_STATUS_MANUAL_PENDING)
+                          FIX_STATUS_HANDOVER, FIX_STATUS_MANUAL_PENDING,
+                          FIX_STATUS_MANUAL_RESOLVED)
 
 
 def done_fix_reject_message(done_status: str) -> str:
@@ -78,6 +85,26 @@ def done_fix_reject_message(done_status: str) -> str:
 
 def fix_status_label(fix_status: str) -> str:
     return _FIX_STATUS_LABELS.get(fix_status, fix_status)
+
+
+def build_fixed_summary(commit: "CommitResult", mr_url: str | None,
+                        trace_id: str | None) -> str:
+    """FIXED 终态的 fix_summary 组装（纯函数）：
+
+    commit message 原文 + 实际 fix 分支名 + commit shortId + 改动/MR 链接。
+    分支名紧跟 message 落在第二行：落库按 1000 字符截断时仍可保留，
+    看板「是否合并」解析器优先读它定位真实分支（撞分支重试后分支名带后缀，重算不可靠）。
+    """
+    summary = commit.message or f"[AI] fix: 自动修复告警 {trace_id}"
+    if commit.branch:
+        summary += f"\n分支: {commit.branch}"
+    if commit.short_id:
+        summary += f"\ncommit: {commit.short_id}"
+    if commit.web_url:
+        summary += f"\n查看改动: {commit.web_url}"
+    if mr_url:
+        summary += f"\nMR: {mr_url}"
+    return summary
 
 
 def fix_service_key(service: str | None) -> str:
@@ -201,15 +228,8 @@ class FixService:
                 branch = commit.branch
                 # 2.5 自动建 MR（合拢最后一公里）：失败不阻断，fix_summary 附 MR 链接
                 mr_url = self._create_merge_request(result, trace_id, commit.branch, fix)
-                # fix_summary 与 GitLab 提交记录对齐：commit message 原文 + shortId + 链接
-                summary = commit.message or f"[AI] fix: 自动修复告警 {trace_id}"
-                if commit.short_id:
-                    summary += f"\ncommit: {commit.short_id}"
-                if commit.web_url:
-                    summary += f"\n查看改动: {commit.web_url}"
-                if mr_url:
-                    summary += f"\nMR: {mr_url}"
-                fix_summary = summary
+                # fix_summary 与 GitLab 提交记录对齐：commit message 原文 + 实际分支 + shortId + 链接
+                fix_summary = build_fixed_summary(commit, mr_url, trace_id)
             elif fix is not None and (fix.fix_type or "").lower() == "non_code":
                 # 确认无需任何处理，属正确结果，不计为修复失败
                 fix_status = FIX_STATUS_NOT_NEEDED
@@ -331,6 +351,44 @@ class FixService:
         log.info("告警已忽略(原状态=%s), traceId=%s", record.fix_status, trace_id)
         return True, "已忽略（判定无需处理）"
 
+    def try_resolve(self, trace_id: str, note: str | None = None) -> tuple[bool, str]:
+        """人工结案（问题已由人工处理解决）：落库 fix_status=MANUAL_RESOLVED 永久防重。
+
+        面向「待人工/已转人工」告警的闭环出口——人工按建议步骤处理完后回填终态，
+        统计口径里计入已解决（与 AI 修复 FIXED 同在分子）；未发起/失败的告警也可直接结案。
+        真终态（已修复/已忽略/人工已解决）拒绝并按状态提示；自动修复执行中拒绝（防结案结果被修复覆盖）。
+        """
+        if self._repository is None:
+            return False, "未配置业务库，结案功能不可用"
+        try:
+            record = self._repository.latest_by_trace_id(trace_id)
+        except Exception as exc:  # noqa: BLE001 - 业务库不可用时友好降级，不向接口层抛 500
+            log.error("查询历史分析结果失败(业务库不可用), traceId=%s, err=%s", trace_id, exc)
+            return False, "查询分析结果失败（业务库不可用），请稍后重试"
+        if record is None:
+            log.warning("未找到告警分析结果, traceId=%s", trace_id)
+            return False, "未找到告警分析结果"
+
+        # 终态校验：注意与修复/忽略不同——待人工/已转人工恰恰是结案的目标状态，不属拒绝范围；
+        # 仅真正终态（已修复/已忽略/人工已解决）拒绝
+        if record.fix_status in (FIX_STATUS_FIXED, FIX_STATUS_NOT_NEEDED, FIX_STATUS_MANUAL_RESOLVED):
+            log.info("该告警已完结(fixStatus=%s)，结案无效。traceId=%s", record.fix_status, trace_id)
+            return False, done_fix_reject_message(record.fix_status)
+
+        # 修复执行中不允许结案：否则结案结果会被执行中的修复覆盖
+        if self._store.get(self._keys.fix_lock + trace_id):
+            log.info("该告警修复执行中，结案被拒绝。traceId=%s", trace_id)
+            return False, "该告警正在自动修复中，请等待修复结果后再结案"
+
+        summary = "人工已处理：问题已解决" + (f"（{note.strip()}）" if note and note.strip() else "")
+        try:
+            self._repository.update_fix_result(record.id, FIX_STATUS_MANUAL_RESOLVED, summary)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("结案落库失败, traceId=%s", trace_id)
+            return False, "结案失败（落库异常），请稍后重试"
+        log.info("告警已人工结案(原状态=%s), traceId=%s", record.fix_status, trace_id)
+        return True, "已结案（人工已解决）"
+
     # ------------------------------------------------------------------ 人工通知
 
     def _send_manual_notify(self, result: AlarmAnalyseResult, trace_id: str,
@@ -350,6 +408,11 @@ class FixService:
             handover_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             steps=steps or "-",
         )
+        # 结案按钮链接（feishu.resolve_jump_url 配置后下发 resolve_url 变量，模板可配「已解决」按钮）
+        resolve_jump = getattr(self._config.feishu, "resolve_jump_url", "") or ""
+        if resolve_jump:
+            resolve_url = resolve_jump + (trace_id or "")
+            variables["resolve_url"] = {"url": resolve_url, "pc_url": resolve_url}
         template_id = self._config.analyse.fix_notify.manual_card_template_id
         try:
             if template_id:
@@ -360,6 +423,68 @@ class FixService:
         except Exception:  # noqa: BLE001
             log.exception("人工处理通知发送失败, traceId=%s", trace_id)
 
+    # ------------------------------------------------------------------ 转人工超时催办
+
+    def remind_stale_manual(self) -> int:
+        """扫描超时未处理的 待人工/已转人工 告警并聚合群催办（APScheduler 定时调用）。
+
+        截止时间锚点=COALESCE(fix_time, create_time)（分析即转人工的记录无 fix_time）；
+        聚合为一条文本消息（催办无配套卡片模板），未配置催办群回退默认告警群。返回滞留条数。
+        """
+        notify = self._config.analyse.fix_notify
+        if self._repository is None:
+            return 0
+        try:
+            records = self._repository.list_stale_manual(
+                datetime.now() - timedelta(hours=notify.stale_hours))
+        except Exception:  # noqa: BLE001 - 催办扫描失败只记日志，不影响其他任务
+            log.exception("转人工催办扫描失败")
+            return 0
+        if not records:
+            return 0
+
+        text = build_manual_stale_text(records, stale_hours=notify.stale_hours)
+        chat_ids = stats.resolve_chat_ids(notify.stale_chat_ids,
+                                          self._config.feishu.default_chat_id)
+        if not chat_ids:
+            log.warning("发现 %s 条超时未处理的转人工告警，但未配置催办群"
+                        "(analyse.fix_notify.stale_chat_ids / feishu.default_chat_id)", len(records))
+            return len(records)
+        for chat_id in chat_ids:
+            try:
+                self._feishu.send_text_to_chat(chat_id, text)
+            except Exception:  # noqa: BLE001 - 催办发送失败只记日志
+                log.exception("转人工催办提醒发送失败, chatId=%s", chat_id)
+        log.info("转人工催办提醒已发送, stale=%s, chats=%s", len(records), len(chat_ids))
+        return len(records)
+
+
+def build_manual_stale_text(records, stale_hours: int, max_items: int = 20) -> str:
+    """转人工催办文本（纯函数）：聚合列出超时未处理的 待人工/已转人工 告警，附等待时长。
+
+    超出 max_items 条时只列前 N 条并注明剩余数量，避免极端积压时消息超长。
+    """
+    lines = [f"⏰ 转人工告警催办：以下告警等待人工处理已超过 {stale_hours} 小时"]
+    for index, record in enumerate(records[:max_items], start=1):
+        waited_hours = _stale_hours_of(record)
+        lines.append(f"{index}. [{record.service_name or '-'}] {record.interface_uri or '-'}"
+                     f" traceId={record.trace_id or '-'}"
+                     f"（{fix_status_label(record.fix_status)}，已等待 {waited_hours} 小时）")
+    if len(records) > max_items:
+        lines.append(f"…另有 {len(records) - max_items} 条未列出，请到告警看板查看全部待处理。")
+    lines.append("处理完成后请点告警卡片「已解决」按钮或在看板结案，避免统计长期挂起。")
+    return "\n".join(lines)
+
+
+def _stale_hours_of(record) -> int:
+    """等待时长（小时）：锚点=修复时间（执行修复转人工的）或创建时间（分析即转人工的）。"""
+    anchor = record.fix_time or record.create_time
+    if anchor is None:
+        return 0
+    delta = datetime.now() - anchor
+    return max(1, int(delta.total_seconds() // 3600))
+
 
 __all__ = ["FixService", "FixAcceptance", "fix_status_label", "fix_service_key",
-           "is_done_status", "done_fix_reject_message"]
+           "is_done_status", "done_fix_reject_message", "build_fixed_summary",
+           "build_manual_stale_text"]

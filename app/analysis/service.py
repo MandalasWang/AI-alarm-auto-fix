@@ -109,8 +109,12 @@ class AlarmAnalyseService:
         except Exception as exc:  # noqa: BLE001
             log.warning("查库上下文获取失败(不阻断), source=%s, err=%s", alarm.source, exc)
 
-        # 5. 生成分析报告并拆段（大模型优先、规则兜底；含【问题归因】）
-        self._report_generator.generate_and_split(result)
+        # 5. 生成分析报告并拆段（大模型优先、规则兜底；含【问题归因】）；
+        #    服务级 LLM 预算触发时跳过模型调用走规则报告（风暴成本闸）
+        llm_allowed = not self._llm_budget_exceeded(result.service)
+        if not llm_allowed:
+            metrics.ANALYSE_LLM_BUDGET_SKIPPED.inc()
+        self._report_generator.generate_and_split(result, llm_allowed=llm_allowed)
 
         # 6. 落库（供卡片回调修复查询；失败不阻断，但修复按钮将不可用）；
         #    归因为依赖/需人工/无需处理时映射初始 fix_status（转人工/待人工/无需处理）
@@ -160,6 +164,27 @@ class AlarmAnalyseService:
             log.warning("指纹重复识别查询失败(不阻断，按首次告警处理), traceId=%s, err=%s",
                         result.trace_id, exc)
             return None
+
+    def _llm_budget_exceeded(self, service: str | None) -> bool:
+        """服务级每小时 LLM 分析预算闸（analyse.llm.hourly_budget_per_service，0=关闭）。
+
+        计数 key 按服务+小时（TTL 1h，kv.incr 原子自增）；计数存储故障时放行
+        （保护闸坏了不误杀正常分析）。重复告警在更早环节短路，不消耗预算。
+        """
+        budget = self._config.analyse.llm.hourly_budget_per_service
+        if budget <= 0 or not service:
+            return False
+        key = f"{self._keys.analyse_llm_budget}{service}:{datetime.now():%Y%m%d%H}"
+        try:
+            count = self._store.incr(key, 3600)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("LLM 分析预算计数失败(放行本次分析), service=%s, err=%s", service, exc)
+            return False
+        if count > budget:
+            log.warning("服务 LLM 分析预算已用尽(%s/%s)，本小时降级规则报告, service=%s",
+                        count, budget, service)
+            return True
+        return False
 
     def _send_manual_notify_if_needed(self, result: AlarmAnalyseResult, chat_id: str) -> None:
         """归因为上下游依赖（转人工排查）/需人工介入（待人工处理）时，发人工处理通知到告警群：

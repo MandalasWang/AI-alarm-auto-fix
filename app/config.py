@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -115,6 +115,9 @@ class LlmConfig(StrictModel):
     max_tokens: int = 2000
     temperature: float = 0.2
     max_retries: int = 2
+    # 告警风暴成本闸：单服务每小时模型分析调用上限（含 Agent 网关与本地 LLM，重复压卡不计）；
+    # 超限该服务当小时降级规则报告（卡片仍有分析内容）。0=不限制（保持既有行为），生产建议 10~30
+    hourly_budget_per_service: int = 0
 
     @property
     def resolved_base_url(self) -> str | None:
@@ -273,6 +276,10 @@ class StorageConfig(StrictModel):
 class ExecutorConfig(StrictModel):
     workers: int = 4
     queue_size: int = 100
+    # 池满策略：inline=调用线程执行（Java 版 CallerRuns 语义，不丢任务但会拖慢推送方）；
+    # reject=接收接口快速拒绝（返回明确文案让推送方稍后重推，风暴场景保护本服务与推送方）。
+    # 仅作用于告警接收；修复回调保持 inline（低频且有锁状态，不能丢）
+    overflow_policy: Literal["inline", "reject"] = "inline"
 
 
 class ServerConfig(StrictModel):
@@ -305,6 +312,7 @@ DEFAULT_KEYS = {
     "fix_service_lock": "system:feishu:alarm:fix:service-lock:",
     "analyse_cache": "alarm:analyse:msg:",
     "feishu_retry_list": "system:feishusendfailed:list",
+    "analyse_llm_budget": "system:feishu:alarm:analyse:llm-budget:",
 }
 
 
@@ -317,6 +325,7 @@ class Keys:
         self.fix_service_lock = p + DEFAULT_KEYS["fix_service_lock"]
         self.analyse_cache = p + DEFAULT_KEYS["analyse_cache"]
         self.feishu_retry_list = p + DEFAULT_KEYS["feishu_retry_list"]
+        self.analyse_llm_budget = p + DEFAULT_KEYS["analyse_llm_budget"]
 
 
 def _apply_env_overrides(config: AppConfig) -> list[str]:

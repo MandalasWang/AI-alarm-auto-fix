@@ -79,9 +79,12 @@ class ReportGenerator:
 
         return self._fallback_report(result)
 
-    def generate_and_split(self, result: AlarmAnalyseResult) -> None:
-        """生成报告并按段拆分填充 analysis / proposal / problem_type（归因段缺失走规则兜底）。"""
-        report = self.generate(result)
+    def generate_and_split(self, result: AlarmAnalyseResult, llm_allowed: bool = True) -> None:
+        """生成报告并按段拆分填充 analysis / proposal / problem_type（归因段缺失走规则兜底）。
+
+        llm_allowed=False（服务级 LLM 预算触发）时跳过模型调用直接走规则兜底报告。
+        """
+        report = self.generate(result) if llm_allowed else self._fallback_report(result)
         result.analysis = self._extract_section(report, "问题定位", "报错分析")
         result.proposal = self._extract_section(report, "修改建议", None)
         result.problem_type = parse_problem_type(report) or rule_problem_type(result)

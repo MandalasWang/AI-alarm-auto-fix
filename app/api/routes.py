@@ -66,14 +66,21 @@ def build_router(container: Container) -> APIRouter:
 
         # 分析链路含 LLM 调用（分钟级），异步执行避免推送方阻塞超时；
         # 链路内部任一环节失败均有降级与日志，不影响接收结果。
-        # _wrapped 里记录异常即可（BoundedExecutor 已兜底记日志，这里显式带上下文）。
+        # 池满策略：inline（默认）=调用线程执行（Java CallerRuns 语义）；
+        # reject=快速拒绝（返回明确文案，推送方可稍后重推），风暴场景保护本服务与推送方。
         def _analyse() -> None:
             try:
                 container.analyse_service.handle_alarm(alarm)
             except Exception:  # noqa: BLE001
                 log.exception("告警分析异步执行失败, source=%s, traceId=%s", alarm.source, alarm.trace_id)
 
-        container.executor.run_or_inline(_analyse)
+        if cfg.executor.overflow_policy == "reject":
+            if not container.executor.submit(_analyse):
+                log.warning("分析执行池已满(策略=reject)，拒绝告警, source=%s, traceId=%s",
+                            alarm.source, alarm.trace_id)
+                return _fail("告警分析队列已满，请稍后重推")
+        else:
+            container.executor.run_or_inline(_analyse)
         return _ok(True)
 
     # ------------------------------------------------------------------ 修复回调

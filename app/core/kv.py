@@ -21,6 +21,7 @@ class KeyValueStore(Protocol):
     def get(self, key: str) -> str | None: ...
     def set(self, key: str, value: str, ttl_seconds: int) -> None: ...
     def delete(self, key: str) -> None: ...
+    def incr(self, key: str, ttl_seconds: int) -> int: ...
     def rpush(self, list_key: str, value: str) -> None: ...
     def lpop(self, list_key: str) -> str | None: ...
     def ping(self) -> bool: ...
@@ -60,6 +61,13 @@ class RedisStore:
 
     def delete(self, key: str) -> None:
         self._redis.delete(key)
+
+    def incr(self, key: str, ttl_seconds: int) -> int:
+        """原子自增（计数器场景，如 LLM 预算）：key 不存在时从 0 起并设置 TTL。"""
+        pipe = self._redis.pipeline()
+        pipe.incr(key)
+        pipe.expire(key, ttl_seconds)
+        return int(pipe.execute()[0])
 
     def rpush(self, list_key: str, value: str) -> None:
         self._redis.rpush(list_key, value)
@@ -116,6 +124,17 @@ class MemoryStore:
     def delete(self, key: str) -> None:
         with self._lock:
             self._data.pop(key, None)
+
+    def incr(self, key: str, ttl_seconds: int) -> int:
+        """进程内原子自增：新键（或已过期）从 1 起并刷新 TTL，已有键只加值不动 TTL。"""
+        with self._lock:
+            current = self._alive(key)
+            if current is None:
+                self._data[key] = ("1", time.monotonic() + ttl_seconds)
+                return 1
+            value = int(current) + 1
+            self._data[key] = (str(value), self._data[key][1])
+            return value
 
     def rpush(self, list_key: str, value: str) -> None:
         with self._lock:

@@ -55,6 +55,7 @@ analyse:
     max_tokens: 2000                    # 思考型模型注意：思维链也计入，修复链路建议 32000
     temperature: 0.2
     max_retries: 2                      # 429/5xx/网络错误的重试次数（指数退避）
+    hourly_budget_per_service: 0        # 单服务每小时模型分析调用上限（含网关与本地 LLM），超限降级规则报告；0=不限制，生产建议 10~30
 
   external:                             # 外挂 Agent 网关（优先调用，失败降级本地 LLM）
     enabled: false
@@ -128,7 +129,8 @@ storage:
 
 executor:
   workers: 4                            # 分析/修复线程池上限（Java 版 core 2 / max 4）
-  queue_size: 100                       # 队列上限；满时退化为调用线程执行（不丢任务）
+  queue_size: 100                       # 队列上限；满时按 overflow_policy 处理
+  overflow_policy: inline               # inline=调用线程执行（不丢任务，会拖慢推送方）；reject=接收接口快速拒绝（推荐生产，推送方可稍后重推）；修复回调始终 inline 不丢任务
 
 dashboard:
   enabled: true                         # Web 告警看板（http://host:8800/dashboard，只读）

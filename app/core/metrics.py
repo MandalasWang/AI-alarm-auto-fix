@@ -110,6 +110,10 @@ EXECUTOR_INFLIGHT = _gauge("alarm_executor_inflight", "执行池在途与排队�
 #: 执行池满被拒绝的任务数（run_or_inline 退化前的那次拒绝）
 EXECUTOR_REJECT = _counter("alarm_executor_reject_total", "执行池满拒绝任务数")
 
+#: LLM 分析预算触发降级数：超每服务每小时预算后跳过模型调用走规则报告
+ANALYSE_LLM_BUDGET_SKIPPED = _counter("alarm_analyse_llm_budget_skipped_total",
+                                      "LLM 分析预算触发降级规则报告数")
+
 
 def render() -> tuple[str, bytes]:
     """渲染 Prometheus 文本协议输出；依赖缺失时返回占位说明。"""
@@ -125,5 +129,6 @@ def available() -> bool:
 __all__ = [
     "ALARM_RECEIVED", "ALARM_ANALYSE", "FIX_ACCEPT", "FIX_RESULT", "FIX_VALIDATION",
     "MR_RESULT", "FEISHU_SEND", "LLM_LATENCY", "LLM_CALL", "LLM_TOKENS",
-    "EXECUTOR_INFLIGHT", "EXECUTOR_REJECT", "render", "available",
+    "EXECUTOR_INFLIGHT", "EXECUTOR_REJECT", "ANALYSE_LLM_BUDGET_SKIPPED",
+    "render", "available",
 ]

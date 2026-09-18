@@ -89,6 +89,24 @@ def test_overview_today_success_rate():
     assert data["today"] == {"total": 4, "fixed": 1, "fixed_by_time": 1, "rate": 50.0}
 
 
+def test_overview_includes_mttr_hours():
+    """MTTR：仓储给出平均修复分钟数 → KPI 输出小时（1 位小数）；缺失时为 None。"""
+
+    class _MttrRepository(FakeRepository):
+        def dashboard_aggregates(self, *args, **kwargs):
+            aggregates = super().dashboard_aggregates(*args, **kwargs)
+            aggregates["mttr_minutes"] = 90.0
+            return aggregates
+
+    data = build_overview(_MttrRepository(), MergeStateResolver(AppConfig(), None),
+                          "test", 14, None, now=datetime(2026, 9, 17, 12, 0))
+    assert data["kpi"]["mttr_hours"] == 1.5
+
+    data_without = build_overview(FakeRepository(), MergeStateResolver(AppConfig(), None),
+                                  "test", 14, None, now=datetime(2026, 9, 17, 12, 0))
+    assert data_without["kpi"]["mttr_hours"] is None
+
+
 def test_build_weekly_series_zero_filled():
     weekly = {date(2026, 9, 14).strftime("%G-W%V"): 9,  # Python 风格键（带 W 补零）
               "2026-37": 5}                             # MySQL 风格键（无 W 不补零）

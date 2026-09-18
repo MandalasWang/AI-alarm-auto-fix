@@ -402,6 +402,8 @@ function renderKpis(data) {
     kpiCard("待人工", k.manual, "", k.manual > 0 ? "c-orange" : ""),
     kpiCard("无需处理", k.not_needed, ""),
     kpiCard("人工已解决", k.manual_resolved ?? "", ""),
+    kpiCard("平均解决时长", k.mttr_hours == null ? "-" : `${k.mttr_hours} 小时`,
+      "窗口内已修复告警从产生到修复的平均耗时（MTTR）", "c-blue"),
     kpiCard("已合并", k.merged,
       k.merge_checked ? `${k.merge_rate}% · 已查 ${k.merge_checked} 条` : "GitLab 未查", "c-blue"),
   ];

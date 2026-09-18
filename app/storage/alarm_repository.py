@@ -227,6 +227,7 @@ class AlarmRepository:
         - daily_fixed：按修复日期（fix_time）的已修复数（趋势图「每日修复」折线）；
         - weekly / weekly_fixed / weekly_repeated：按 ISO 周的 告警数/修复数/重复数
           （键如 "2026-W37"，看板近 12 周对比），传 weekly_start 才统计；
+        - mttr_minutes：窗口内 FIXED 记录从产生到修复的平均分钟数（无已修复记录为 None）；
         - daily_start：每日序列的独立统计起点（缺省=start；看板日折线固定近 30 天时传入）；
         - system_type：系统分类过滤（看板「按系统切换」）。
         """
@@ -320,10 +321,18 @@ class AlarmRepository:
                                "fixed": int(row["fixed"] or 0), "pending": int(row["pending"] or 0),
                                "failed": int(row["failed"] or 0)}
                               for row in cursor.fetchall()]
+                cursor.execute(
+                    "SELECT AVG(TIMESTAMPDIFF(MINUTE, create_time, fix_time)) AS m"
+                    f" FROM alarm_analyze_result {filters}"
+                    " AND fix_status = 'FIXED' AND fix_time IS NOT NULL",
+                    args,
+                )
+                row = cursor.fetchone()
+                mttr_minutes = (float(row["m"]) if row and row["m"] is not None else None)
         return {"fix_status": aggregates["fix_status"], "problem_type": aggregates["problem_type"],
                 "repeat_type": aggregates["repeat_type"], "daily": daily, "daily_fixed": daily_fixed,
                 "weekly": weekly, "weekly_fixed": weekly_fixed, "weekly_repeated": weekly_repeated,
-                "by_service": by_service}
+                "by_service": by_service, "mttr_minutes": mttr_minutes}
 
     def list_fixed_since(self, start: datetime, limit: int = 50) -> list[AlarmAnalyzeRecord]:
         """窗口内按修复时间倒序的已修复记录（看板合并状态扫描用，不含 analyze_content 大字段）。"""

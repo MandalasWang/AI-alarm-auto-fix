@@ -321,6 +321,7 @@ def build_overview(repository: AlarmRepository, resolver: MergeStateResolver, en
 
     daily_series = build_daily_series(daily_start, agg, moment)
     today_bucket = daily_series[-1] if daily_series else None
+    mttr_minutes = agg.get("mttr_minutes")
     today = None
     if today_bucket is not None:
         today = {
@@ -356,6 +357,8 @@ def build_overview(repository: AlarmRepository, resolver: MergeStateResolver, en
             "merge_scanned": merge_scanned,
             "merge_truncated": merge_truncated,
             "merge_rate": round(merged / merge_checked * 100, 1) if merge_checked else None,
+            # MTTR：窗口内已修复告警从产生到修复的平均时长（小时，1 位小数；无修复记录为 None）
+            "mttr_hours": round(mttr_minutes / 60, 1) if mttr_minutes is not None else None,
         },
         "status_distribution": [
             {"status": key, "label": _fix_status_label_of(None if key == _NULL_KEY else key),

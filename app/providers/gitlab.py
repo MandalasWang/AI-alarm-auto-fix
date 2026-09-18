@@ -229,6 +229,58 @@ class GitLabClient:
         mrs = response.json()
         return mrs[0] if mrs else None
 
+    def merge_request_by_source_branch(self, project_id: str, source_branch: str) -> dict | None:
+        """按源分支查最近一条任意状态 MR（看板「是否合并」用）。
+
+        返回 {state, web_url}（state: merged/opened/closed）；该分支没有 MR 返回空 dict；
+        查询失败返回 None（调用方据此区分「确认没有」与「查不到」）。
+        """
+        url = f"{self._base_url}{MERGE_REQUEST_API.format(project_id=project_id)}"
+        try:
+            response = self._http.fetch(
+                "GET", url,
+                params={"state": "all", "source_branch": source_branch,
+                        "per_page": "1", "order_by": "created_at", "sort": "desc"},
+                headers=self._headers(), timeout_ms=self._timeout_ms,
+            )
+        except UpstreamError as exc:
+            log.warning("GitLab MR 状态查询异常, branch=%s, err=%s", source_branch, exc.detail)
+            return None
+        if response.status_code != 200:
+            log.warning("GitLab MR 状态查询失败, branch=%s, status=%s",
+                        source_branch, response.status_code)
+            return None
+        mrs = response.json()
+        if not mrs:
+            return {}
+        first = mrs[0]
+        return {"state": first.get("state"), "web_url": first.get("web_url")}
+
+    def commit_branch_refs(self, project_id: str, commit_sha: str) -> list[str] | None:
+        """查询包含指定 commit 的分支名列表（看板「是否合并」用）。
+
+        commit 已被基线分支包含 ⇔ 基线分支名出现在返回列表中，即「已合并」的 GitLab 侧真相。
+        查询失败返回 None；commit 不存在（404）返回空列表。只取第一页（per_page=100，
+        单 commit 被上百个分支包含的场景极罕见）。
+        """
+        url = (f"{self._base_url}{COMMIT_API.format(project_id=project_id)}"
+               f"/{quote(commit_sha, safe='')}/refs")
+        try:
+            response = self._http.fetch(
+                "GET", url, params={"type": "branch", "per_page": "100"},
+                headers=self._headers(), timeout_ms=self._timeout_ms,
+            )
+        except UpstreamError as exc:
+            log.warning("GitLab commit 分支查询异常, sha=%s, err=%s", commit_sha, exc.detail)
+            return None
+        if response.status_code == 404:
+            return []
+        if response.status_code != 200:
+            log.warning("GitLab commit 分支查询失败, sha=%s, status=%s",
+                        commit_sha, response.status_code)
+            return None
+        return [str(item.get("name") or "") for item in response.json()]
+
     def list_branches(self, project_id: str, name_prefix: str, max_pages: int = 5) -> list[dict]:
         """列出名字以指定前缀开头的分支（逐页拉取后客户端过滤；催办扫描 fix_bug_* 用）。"""
         url = f"{self._base_url}{BRANCH_API.format(project_id=project_id)}"

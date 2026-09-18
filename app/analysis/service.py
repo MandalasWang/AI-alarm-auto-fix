@@ -191,6 +191,7 @@ class AlarmAnalyseService:
     def _extract(self, alarm: AlarmLog) -> AlarmAnalyseResult:
         result = AlarmAnalyseResult()
         result.service = alarm.source
+        result.system_type = alarm.system_type
         result.level = _normalize_level(alarm.level)
         result.title = alarm.title or f"{result.level} 告警"
         result.trace_id = alarm.trace_id
@@ -331,7 +332,7 @@ class AlarmAnalyseService:
                 result.to_json(), result.trace_id, result.service, result.request_uri,
                 problem_type=result.problem_type, fingerprint=result.fingerprint,
                 repeat_type=result.repeat_type, root_id=result.root_id,
-                fix_status=initial_status)
+                fix_status=initial_status, system_type=result.system_type)
             log.info("告警分析结果落库成功, id=%s, traceId=%s, service=%s",
                      record_id, result.trace_id, result.service)
             return True

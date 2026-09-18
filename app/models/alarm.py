@@ -37,6 +37,7 @@ class AlarmLog(ApiModel):
     stack_trace: str | None = None
     trace_id: str | None = None
     time: str | None = None
+    system_type: str | None = None  # 系统分类（如 ccd-归口系统），落库 system_type 列
     business_keys: dict[str, Any] | None = None
     raw: str | None = None
     chat_id: str | None = None
@@ -48,6 +49,7 @@ class AlarmAnalyseResult(ApiModel):
 
     service: str | None = None
     env: str | None = None
+    system_type: str | None = None     # 系统分类（如 ccd-归口系统）
     level: str | None = None
     title: str | None = None
     core_message: str | None = None
@@ -85,7 +87,7 @@ class AlarmAnalyzeRecord:
     """alarm_analyze_result 表行（只读查询结果，对应 Java entity）。"""
 
     __slots__ = (
-        "id", "trace_id", "analyze_content", "service_name", "interface_uri",
+        "id", "trace_id", "analyze_content", "service_name", "system_type", "interface_uri",
         "create_time", "update_time", "fix_status", "fix_summary", "fix_time",
         "problem_type", "fingerprint", "repeat_type", "root_id",
     )
@@ -96,6 +98,7 @@ class AlarmAnalyzeRecord:
         trace_id: str | None = None,
         analyze_content: str | None = None,
         service_name: str | None = None,
+        system_type: str | None = None,
         interface_uri: str | None = None,
         create_time: datetime | None = None,
         update_time: datetime | None = None,
@@ -111,6 +114,7 @@ class AlarmAnalyzeRecord:
         self.trace_id = trace_id
         self.analyze_content = analyze_content
         self.service_name = service_name
+        self.system_type = system_type
         self.interface_uri = interface_uri
         self.create_time = create_time
         self.update_time = update_time

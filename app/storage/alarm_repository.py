@@ -40,19 +40,28 @@ class AlarmRepository:
 
     # ------------------------------------------------------------------ 写
 
+    @staticmethod
+    def _clip(value: str | None, length: int) -> str | None:
+        """按列宽截断（应用层兜底，避免超长写入在严格模式下整条失败）。"""
+        return value[:length] if value else value
+
     def save(self, result_json: str, trace_id: str | None, service: str | None,
              interface_uri: str | None, problem_type: str | None = None,
              fingerprint: str | None = None, repeat_type: str | None = None,
-             root_id: int | None = None, fix_status: str | None = None) -> int | None:
+             root_id: int | None = None, fix_status: str | None = None,
+             system_type: str | None = None) -> int | None:
         now = datetime.now()
         with self._connect() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     "INSERT INTO alarm_analyze_result"
-                    " (trace_id, analyze_content, service_name, `interface`, create_time, update_time,"
-                    "  problem_type, fingerprint, repeat_type, root_id, fix_status)"
-                    " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                    (trace_id, result_json, service, interface_uri, now, now,
+                    " (trace_id, analyze_content, service_name, system_type, `interface`,"
+                    "  create_time, update_time, problem_type, fingerprint, repeat_type,"
+                    "  root_id, fix_status)"
+                    " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    (self._clip(trace_id, 255) or "", result_json,
+                     self._clip(service, 50), self._clip(system_type, 30),
+                     self._clip(interface_uri, 100), now, now,
                      problem_type, fingerprint, repeat_type, root_id, fix_status),
                 )
                 return cursor.lastrowid
@@ -110,13 +119,15 @@ class AlarmRepository:
 
     #: 列表/扫描场景的显式列（不含大字段也不会误读缺列；analyze_content 仅列表页需要）
     _LIST_COLUMNS = (
-        "id, trace_id, analyze_content, service_name, `interface`, create_time, update_time,"
-        " fix_status, fix_summary, fix_time, problem_type, fingerprint, repeat_type, root_id"
+        "id, trace_id, analyze_content, service_name, system_type, `interface`, create_time,"
+        " update_time, fix_status, fix_summary, fix_time, problem_type, fingerprint,"
+        " repeat_type, root_id"
     )
 
     def page_alarms(self, start: datetime, end: datetime, service: str | None = None,
                     fix_status: str | None = None, keyword: str | None = None,
-                    offset: int = 0, limit: int = 20) -> tuple[list[AlarmAnalyzeRecord], int]:
+                    offset: int = 0, limit: int = 20,
+                    system_type: str | None = None) -> tuple[list[AlarmAnalyzeRecord], int]:
         """分页查告警（创建时间倒序），返回 (记录列表, 总数)。
 
         fix_status='NULL' 表示筛选未发起修复的告警；keyword 模糊匹配 traceId / 接口。
@@ -125,6 +136,9 @@ class AlarmRepository:
         if service:
             where.append("service_name = %s")
             args.append(service)
+        if system_type:
+            where.append("system_type = %s")
+            args.append(system_type)
         if fix_status == "NULL":
             where.append("fix_status IS NULL")
         elif fix_status:
@@ -155,22 +169,39 @@ class AlarmRepository:
                 row = cursor.fetchone()
         return _to_record(row) if row else None
 
-    def list_services(self, limit: int = 500) -> list[str]:
-        """去重服务名列表（看板筛选项）。"""
+    def list_services(self, limit: int = 500, system_type: str | None = None) -> list[str]:
+        """去重服务名列表（看板筛选项），可按系统分类过滤。"""
+        where, args = "WHERE service_name IS NOT NULL AND service_name <> ''", []
+        if system_type:
+            where += " AND system_type = %s"
+            args.append(system_type)
         with self._connect() as connection:
             with connection.cursor(pymysql.cursors.DictCursor) as cursor:
                 cursor.execute(
-                    "SELECT DISTINCT service_name FROM alarm_analyze_result"
-                    " WHERE service_name IS NOT NULL AND service_name <> ''"
+                    f"SELECT DISTINCT service_name FROM alarm_analyze_result {where}"
                     " ORDER BY service_name LIMIT %s",
-                    (limit,),
+                    (*args, limit),
                 )
                 rows = cursor.fetchall()
         return [str(row["service_name"]) for row in rows]
 
+    def list_system_types(self, limit: int = 50) -> list[str]:
+        """去重系统分类列表（看板「按系统切换」筛选项）。"""
+        with self._connect() as connection:
+            with connection.cursor(pymysql.cursors.DictCursor) as cursor:
+                cursor.execute(
+                    "SELECT DISTINCT system_type FROM alarm_analyze_result"
+                    " WHERE system_type IS NOT NULL AND system_type <> ''"
+                    " ORDER BY system_type LIMIT %s",
+                    (limit,),
+                )
+                rows = cursor.fetchall()
+        return [str(row["system_type"]) for row in rows]
+
     def dashboard_aggregates(self, start: datetime, service: str | None = None,
                              weekly_start: datetime | None = None,
-                             daily_start: datetime | None = None) -> dict:
+                             daily_start: datetime | None = None,
+                             system_type: str | None = None) -> dict:
         """看板聚合（单连接多条聚合 SQL，全部走 idx_create_time 索引）：
 
         - status / problem_type / repeat_type：分布计数（NULL 归一为 'NULL' 键）；
@@ -178,12 +209,20 @@ class AlarmRepository:
         - daily_fixed：按修复日期（fix_time）的已修复数（趋势图「每日修复」折线）；
         - weekly / weekly_fixed / weekly_repeated：按 ISO 周的 告警数/修复数/重复数
           （键如 "2026-W37"，看板近 12 周对比），传 weekly_start 才统计；
-        - daily_start：每日序列的独立统计起点（缺省=start；看板日折线固定近 30 天时传入）。
+        - daily_start：每日序列的独立统计起点（缺省=start；看板日折线固定近 30 天时传入）；
+        - system_type：系统分类过滤（看板「按系统切换」）。
         """
-        filters, args = "WHERE create_time >= %s", [start]
-        if service:
-            filters += " AND service_name = %s"
-            args.append(service)
+        def _scoped(clause: str, base_args: list, column: str, value: str | None):
+            if value:
+                clause += f" AND {column} = %s"
+                base_args.append(value)
+            return clause, base_args
+
+        filters, args = _scoped("WHERE create_time >= %s", [start], "service_name", service)
+        filters, args = _scoped(filters, args, "system_type", system_type)
+        daily_filters, daily_args = _scoped(
+            "WHERE create_time >= %s", [daily_start or start], "service_name", service)
+        daily_filters, daily_args = _scoped(daily_filters, daily_args, "system_type", system_type)
         daily_filters, daily_args = "WHERE create_time >= %s", [daily_start or start]
         if service:
             daily_filters += " AND service_name = %s"
@@ -223,10 +262,10 @@ class AlarmRepository:
                 weekly_fixed: dict[str, int] = {}
                 weekly_repeated: dict[str, int] = {}
                 if weekly_start is not None:
-                    weekly_filters, weekly_args = "WHERE create_time >= %s", [weekly_start]
-                    if service:
-                        weekly_filters += " AND service_name = %s"
-                        weekly_args.append(service)
+                    weekly_filters, weekly_args = _scoped(
+                        "WHERE create_time >= %s", [weekly_start], "service_name", service)
+                    weekly_filters, weekly_args = _scoped(
+                        weekly_filters, weekly_args, "system_type", system_type)
                     cursor.execute(
                         # %% 转义：PyMySQL 对带参 SQL 做 Python % 格式化，字面 % 须双写
                         "SELECT DATE_FORMAT(create_time, '%%x-%%v') AS w, COUNT(*) AS c"
@@ -317,4 +356,5 @@ def _to_record(row: dict) -> AlarmAnalyzeRecord:
         fingerprint=row.get("fingerprint"),
         repeat_type=row.get("repeat_type"),
         root_id=row.get("root_id"),
+        system_type=row.get("system_type"),
     )

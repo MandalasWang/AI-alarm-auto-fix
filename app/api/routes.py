@@ -105,6 +105,30 @@ def build_router(container: Container) -> APIRouter:
         ok, message = container.fix_service.try_ignore(trace_id)
         return _ok(True) if ok else _fail(message)
 
+    # ------------------------------------------------------------------ 告警看板
+
+    @router.get("/inner/feishu/alarm/dashboard/report",
+                summary="告警看板统计：异步统计周/月数据、日/周趋势折线与月告警分析并推送飞书群；每自然日仅推送一次",
+                dependencies=[Depends(inner_guard)])
+    def dashboard_report() -> dict:
+        """与 Java 版契约一致：异步受理（月告警分析含 LLM 十秒级，立即返回不阻塞调用方）；
+        本接口被日报卡片「查看详情」按钮指向、按钮可被反复点击，故每自然日仅放行一次推送
+        （Redis 按日期幂等，推送失败释放锁允许当日重试），重复触发返回 data=False + 提示。"""
+        if not container.dashboard_report.try_acquire_daily_send_lock():
+            log.info("看板今日已推送过，拒绝重复触发")
+            return {"code": 0, "message": "今日看板已推送过，请勿重复触发", "data": False}
+        log.info("收到告警看板统计请求，提交异步执行")
+
+        def _send() -> None:
+            try:
+                container.dashboard_report.send_dashboard_report()
+            except Exception:  # noqa: BLE001
+                log.exception("告警看板异步执行失败，释放当日推送锁允许重试")
+                container.dashboard_report.release_daily_send_lock()
+
+        container.executor.run_or_inline(_send)
+        return _ok(True)
+
     # ------------------------------------------------------------------ 卡片交互回调（公网）
 
     @router.post("/feishu/alarm/callback", summary="飞书告警卡片按钮点击回调")

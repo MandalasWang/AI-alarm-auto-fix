@@ -231,7 +231,7 @@ class DailyReportConfig(StrictModel):
     insight_max_items: int = 4
 
 
-class DashboardConfig(StrictModel):
+class DashboardReportConfig(StrictModel):
     """告警看板配置（HTTP 接口按需触发：GET /inner/feishu/alarm/dashboard/report）。"""
 
     # 看板卡片模板 ID（模板变量：content 文本 + day_chart/week_chart 图表变量 + annaly 月告警分析）；
@@ -250,7 +250,7 @@ class AnalyseConfig(StrictModel):
     db: DbConfig = Field(default_factory=DbConfig)
     fix_notify: FixNotifyConfig = Field(default_factory=FixNotifyConfig)
     daily_report: DailyReportConfig = Field(default_factory=DailyReportConfig)
-    dashboard: DashboardConfig = Field(default_factory=DashboardConfig)
+    dashboard: DashboardReportConfig = Field(default_factory=DashboardReportConfig)
     repeat: RepeatConfig = Field(default_factory=RepeatConfig)
     fix_validation: FixValidationConfig = Field(default_factory=FixValidationConfig)
 

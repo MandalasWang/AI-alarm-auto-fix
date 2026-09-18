@@ -26,6 +26,7 @@ from app.providers.gitlab import GitLabClient
 from app.providers.llm import LlmChatClient
 from app.providers.nacos import NacosConfigResolver
 from app.reporting.daily_report import DailyReportService
+from app.reporting.dashboard_report import AlarmDashboardService
 from app.storage.alarm_repository import AlarmRepository
 
 log = logging.getLogger(__name__)
@@ -52,6 +53,7 @@ class Container:
     fix_validator: FixValidator
     mr_service: MergeRequestService
     daily_report: DailyReportService
+    dashboard_report: AlarmDashboardService
     repository: AlarmRepository | None
 
     def shutdown(self) -> None:
@@ -91,6 +93,7 @@ def load_and_build(config_path: str | None = None) -> Container:
     fix_service = FixService(config, keys, store, feishu, fix_generator, fix_committer, repository,
                              validator=fix_validator, merger=mr_service)
     daily_report = DailyReportService(config, feishu, llm, repository)
+    dashboard_report = AlarmDashboardService(config, feishu, llm, repository, store)
 
     return Container(
         config=config, keys=keys, http=http, store=store, executor=executor, feishu=feishu,
@@ -98,7 +101,7 @@ def load_and_build(config_path: str | None = None) -> Container:
         report_generator=report_generator, analyse_service=analyse_service,
         fix_generator=fix_generator, fix_committer=fix_committer, fix_service=fix_service,
         fix_validator=fix_validator, mr_service=mr_service,
-        daily_report=daily_report, repository=repository,
+        daily_report=daily_report, dashboard_report=dashboard_report, repository=repository,
     )
 
 

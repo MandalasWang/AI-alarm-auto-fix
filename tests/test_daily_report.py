@@ -2,10 +2,13 @@
 from datetime import date, datetime
 
 from app.models.alarm import AlarmAnalyzeRecord
-from app.reporting.daily_report import (_exception_class_of, _fix_status_label,
-                                        _month_start_suffix, _repeat_marker,
-                                        _short_trace_id, _stats_line, _stats_of,
-                                        _week_number)
+from app.reporting.stats import (exception_class_of as _exception_class_of,
+                                 fix_status_label as _fix_status_label,
+                                 month_start_suffix as _month_start_suffix,
+                                 repeat_marker as _repeat_marker,
+                                 short_trace_id as _short_trace_id,
+                                 stats_line as _stats_line, stats_of as _stats_of,
+                                 week_number as _week_number)
 
 
 def _row(fix_status: str | None, analyze_content: str | None = None,

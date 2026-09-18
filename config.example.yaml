@@ -108,8 +108,11 @@ analyse:
     bot_name: 归口业务小助手
     bot_join_time: ""                   # 页脚「入群」时间，空则不展示
     data_source_name: 归口业务告警群
-    insights_llm_enabled: true          # 关键洞察用 LLM 生成，失败降级规则洞察
+    insights_llm_enabled: true          # 月告警分析（annaly，告警看板）用 LLM 生成，失败降级规则洞察
     insight_max_items: 4
+  dashboard:                            # 告警看板（GET /inner/feishu/alarm/dashboard/report，按需触发）
+    card_template_id: ""                # 看板模板（含绑定 day_chart/week_chart 图表组件与 annaly）；空则回退日报模板
+    detail_url: ""                      # 详情链接（detail_url 变量，日报/看板卡「查看详情」按钮共用）；空则不下发
 
 storage:
   redis_url: ""                         # Redis 连接，如 redis://:pwd@127.0.0.1:6379/0；空则退化为进程内锁/缓存（仅单实例可用）

@@ -12,7 +12,7 @@
 | 技术栈 | FastAPI · httpx · PyMySQL · redis-py · pydantic v2 · APScheduler · PyYAML |
 | 默认端口 | 8800 |
 | 配置 | 单 YAML 文件 + 环境变量覆盖密钥（不依赖 Nacos） |
-| 测试 | 59 个单元/冒烟测试 + test 环境端到端实测 |
+| 测试 | 133 个单元/冒烟测试 + test 环境端到端实测 |
 
 ---
 
@@ -43,6 +43,7 @@
 | 自动修复 | 按历史分析让 LLM 生成修复后**整文件**，提交到 `fix_bug_日期_traceId` 分支并群发结果 | 飞书卡片「修复」按钮（跳转 URL） |
 | 卡片交互 | 卡片 confirm/ignore 按钮回调路由 | 飞书服务器 POST |
 | 告警日报 | 昨日/本周/本月统计 + LLM 关键洞察，推多群 | 内置调度每天 09:40（北京时间） |
+| Web 告警看板 | 浏览器查看 KPI（是否解决/是否合并）、问题数折线图、明细与处理详情 | 打开 `http://host:8800/dashboard`（只读，可选 Basic 认证） |
 
 总架构（虚线为可降级通道）：
 
@@ -310,6 +311,9 @@ AI-alarm_autoFix/
 │   │   ├── committer.py         # 修复提交（网关→GitLab 兜底/分支命名）          ← GitLabFixCommitter
 │   │   └── service.py           # 受理四道闸门/异步执行/三态/通知/双锁           ← FeishuAlarmController.executeFix
 │   ├── reporting/daily_report.py# 日报（统计/洞察/推送）                        ← AlarmDailyReportService + FeishuAlarmDailyReportJob
+│   ├── web/
+│   │   ├── dashboard.py         # Web 看板（KPI/趋势/明细 API + 合并状态解析器）  ← 新增（Java 版无）
+│   │   └── templates/dashboard.html # 看板单页（原生 JS 自绘 SVG 图表，无前端构建链）
 │   ├── feishu/
 │   │   ├── client.py            # token缓存/发消息/失败重发队列                  ← FeishuMessageServiceImpl(chat部分)
 │   │   └── cards.py             # 卡片构建+字节预算削减                          ← FeishuCardBuilder + TextTruncator
@@ -319,7 +323,7 @@ AI-alarm_autoFix/
 ├── sql/schema.sql               # alarm_analyze_result 建表 DDL（含旧表补列 ALTER）
 ├── e2e/                         # test 环境端到端实测脚本（预检/告警报文/日报驱动）
 ├── config.example.yaml          # 全量配置模板（逐项注释）
-├── tests/                       # 59 个单元/冒烟测试
+├── tests/                       # 133 个单元/冒烟测试
 ├── requirements.txt / pytest.ini / Dockerfile / .gitignore
 └── config.yaml                  # 真实运行配置（gitignore，含凭证禁止提交）
 ```
@@ -402,6 +406,14 @@ curl -X POST http://127.0.0.1:8800/inner/feishu/alarm/receive \
 | | `chat_ids` / `card_template_id` | 推送群列表 / 日报模板（变量 content）；模板不可见时自动文本兜底 |
 | | `insights_llm_enabled` / `insight_max_items` | LLM 洞察开关 / 最多条数 |
 
+### dashboard（Web 告警看板）
+
+| 键 | 说明 |
+| --- | --- |
+| `enabled` | false 时不下线 /dashboard 路由 |
+| `username` / `password` | 可选 HTTP Basic 认证，两者同时非空才启用（页面与 API 一起受保护）；密码可用环境变量 `ALARM_DASHBOARD_PASSWORD` 覆盖 |
+| `merge_cache_seconds` | 「是否合并」GitLab 查询结果的进程内缓存秒数（默认 300） |
+
 ### storage / executor / server
 
 | 键 | 说明 |
@@ -455,8 +467,6 @@ curl -X POST http://127.0.0.1:8800/inner/feishu/alarm/receive \
 
 ### 6.4 POST /feishu/alarm/callback —— 飞书卡片交互回调
 
-### 6.3 POST /feishu/alarm/callback —— 飞书卡片交互回调
-
 飞书服务器调用（需公网可达）。响应 toast：
 `{"toast":{"type":"success","content":"已确认，处理中"}}`；token 不匹配/未知 action 返回 error toast。
 
@@ -474,6 +484,33 @@ LLM/外挂网关按设计允许运行期降级，不作为就绪条件。
 ### 6.7 GET /metrics —— Prometheus 指标
 
 文本协议输出（见 2.8 节指标清单）。
+
+### 6.8 GET /dashboard —— Web 告警看板
+
+只读页面 + 配套 JSON API（`dashboard.enabled=false` 时不下线；配置了
+`dashboard.username/password` 后页面与 API 一起走 HTTP Basic）：
+
+| 端点 | 说明 |
+| --- | --- |
+| `GET /dashboard` | 看板单页，**总览 / 告警明细** 两个标签页分区布局（原生 JS 自绘 SVG 图表，无 CDN/构建链） |
+| `GET /api/dashboard/overview?days=14&service=` | KPI（总数/已解决+解决率/未处理/修复失败/待人工/无需处理/已合并+合并率）+ 状态与归因分布（含占比）+ 每日新增/修复折线 + **近 12 周对比柱图** + **服务问题点 TOP10**（堆叠条：已解决/未处理/失败） |
+| `GET /api/dashboard/alarms?page=&size=&days=&service=&status=&q=` | 分页明细（页面默认每页 10 条、查近 30 天；FIXED 记录带合并状态徽标） |
+| `GET /api/dashboard/alarms/{id}` | 详情：完整分析内容 + 处理情况（fix_summary/合并状态/链接） |
+| `GET /api/dashboard/services` | 服务名筛选项 |
+
+**「是否合并」判定**（以 GitLab 为准，进程内缓存 `merge_cache_seconds`）：
+
+1. **commit 对比（主）**：fix_summary 里的 `commit: <shortId>` 调 GitLab「查询包含该 commit
+   的分支」，修复基线分支 `fix_base_branch` 在其中 ⇒ 已合并；
+2. **MR 状态（兜底）**：按 fix 分支名查任意状态 MR，`state=merged` ⇒ 已合并
+   （兼容 squash merge 换 sha 的场景；`opened` ⇒ 待合并）；
+3. 两者都无法确认（GitLab 未配置/查询失败/记录缺 commit 信息）⇒ 显示「未知」，
+   详情页附 fix_summary 里的 MR/改动链接兜底。
+
+**口径与日报一致（勿改出两套）**：解决率 = 已解决 / (总数 − 无需处理 − 转人工 − 待人工 − 重复)，
+复发（RECURRED）不算重复、保留在分母；分母非正时看板不展示该项。
+业务库未配置时 API 返回 code=500 与明确文案，页面本身仍可访问。
+合并扫描每轮最多查最近 50 条已修复记录（超出在 KPI 副标题标注），首屏后走缓存。
 
 ---
 
@@ -508,7 +545,7 @@ requestParam, url, problemType, fingerprint, repeatType, rootId`（空值省略�
 
 ## 8. 测试与实测报告
 
-### 8.1 单元/冒烟测试（59 个，不出网）
+### 8.1 单元/冒烟测试（133 个，不出网）
 
 ```bash
 python -m pytest -q
@@ -606,7 +643,7 @@ docker run -d --name ai-alarm -p 8800:8800 \
 | 3 | 出站 HTTP 统一超时 + 429/5xx 指数退避重试；日志不落 header/body |
 | 4 | **LLM 空 content 报错带 finish_reason 与响应体摘要**（修复 Java 版排障信息丢失缺陷） |
 | 5 | 业务库不可用时修复接口友好降级（明确文案）而非 500 |
-| 6 | 59 个单测 + test 环境真实验证，核心语义全部有测试锁定 |
+| 6 | 133 个单测 + test 环境真实验证，核心语义全部有测试锁定 |
 
 **有意的行为差异**
 

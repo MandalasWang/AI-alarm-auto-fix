@@ -12,7 +12,7 @@
 | 技术栈 | FastAPI · httpx · PyMySQL · redis-py · pydantic v2 · APScheduler · PyYAML |
 | 默认端口 | 8800 |
 | 配置 | 单 YAML 文件 + 环境变量覆盖密钥（不依赖 Nacos） |
-| 测试 | 133 个单元/冒烟测试 + test 环境端到端实测 |
+| 测试 | 209 个单元/冒烟测试 + test 环境端到端实测 |
 
 ---
 
@@ -41,6 +41,7 @@
 | --- | --- | --- |
 | 告警分析 | 堆栈定位出错代码片段 + 查相关库表 + LLM 交叉分析，卡片推飞书群 | 其他服务 POST 告警报文 |
 | 自动修复 | 按历史分析让 LLM 生成修复后**整文件**，提交到 `fix_bug_日期_traceId` 分支并群发结果 | 飞书卡片「修复」按钮（跳转 URL） |
+| 人工结案 | 待人工/转人工告警处理完后回填「人工已解决」终态，计入解决率 | 飞书卡片「已解决」按钮 / 看板详情（跳转 URL） |
 | 卡片交互 | 卡片 confirm/ignore 按钮回调路由 | 飞书服务器 POST |
 | 告警日报 | 昨日/本周/本月统计 + LLM 关键洞察，推多群 | 内置调度每天 09:40（北京时间） |
 | Web 告警看板 | 浏览器查看 KPI（是否解决/是否合并）、问题数折线图、明细与处理详情 | 打开 `http://host:8800/dashboard`（只读，可选 Basic 认证） |
@@ -70,7 +71,8 @@
 
 **第 0 步：接收（同步，毫秒级返回）** — `app/api/routes.py` `receive()`
 推送方 POST camelCase 报文（`AlarmLog` 模型，`app/models/alarm.py`）。校验开关 `feishu.enable`
-后把分析任务丢进有界线程池（`app/core/executor.py`，4 线程/队列 100，满则退化为调用线程执行不丢任务），
+后把分析任务丢进有界线程池（`app/core/executor.py`，4 线程/队列 100；池满按
+`executor.overflow_policy` 处理：`inline`（默认）退化调用线程执行不丢任务，`reject` 快速拒绝提示重推），
 立即返回 `{"code":0}`——分析含 LLM 调用是分钟级，绝不让推送方等。
 
 **第 1 步：提取核心信息** — `app/analysis/service.py` `_extract()`
@@ -83,7 +85,8 @@
 **第 1.5 步：指纹重复/复发识别** — `app/core/fingerprint.py` + `analysis/service.py`
 指纹 = `md5(service|requestUri|exceptionClass|首个业务帧类.方法)`（**不含行号**：修复增删代码
 导致的行号平移不算新错误）。`analyse.repeat.window_hours`（默认 24h，≤0 关闭）窗口内查同指纹
-最新记录：原告警**已修复（FIXED）**→ **复发 RECURRED**，卡片带「⚠️ 修复后复发」标注、可重新点修复；
+最新记录：原告警**已解决（FIXED 或人工已解决 MANUAL_RESOLVED）**→ **复发 RECURRED**，
+卡片带「⚠️ 修复后复发」标注、携带原告警修复摘要（`recurred_fix_summary`，含分支/commit/MR 链接）、可重新点修复；
 其余（未发起/失败/无需处理/转人工/待人工）→ **重复 REPEATED**，**在取码/查库/LLM 之前直接短路**——
 只落库计数（归因结论继承原告警，`root_id` 链到真根），不推卡片、不调模型。
 
@@ -129,7 +132,9 @@ NOT_A_PROBLEM→`NOT_NEEDED`、CODE→NULL（走自动修复按钮）。失败�
 模板卡片 `{type:template, data:{template_id, template_variable:{...}}}`。飞书硬限 30KB：
 各变量先按字节预算截断（短字段 512B / 参数 2KB / 分析建议各 6KB），序列化超 28KB 再按
 「堆栈→param→suggest→analyze」优先级削减。卡片新增 `problem_type`（归因文案）/`repeat_label`
-（复发标注，仅复发输出）/`root_id`/`ignor_url`（忽略按钮链接，配 `feishu.ignore_jump_url` 后输出）。
+（复发标注，仅复发输出）/`root_id`/`ignor_url`（忽略按钮链接，配 `feishu.ignore_jump_url` 后输出）/
+`resolve_url`（结案按钮链接，配 `feishu.resolve_jump_url` 后输出）/`detail_url`（看板详情链接，
+配 `analyse.dashboard.detail_url` 后输出）/`recurred_fix_summary`（原修复摘要，仅复发输出）。
 发送走飞书 `im/v1/messages`（tenant_access_token 缓存提前 5 分钟刷新），失败自动进 Redis 重发队列
 （最多重试 3 次）。归因为 DEPENDENCY/MANUAL_REQUIRED 时**补发人工处理通知**
 （模板 `analyse.fix_notify.manual_card_template_id`，未配则文本兜底，附建议步骤）。
@@ -147,7 +152,7 @@ NOT_A_PROBLEM→`NOT_NEEDED`、CODE→NULL（走自动修复按钮）。失败�
 | --- | --- | --- |
 | 1 | Redis 执行锁 `SET NX EX 10min`（防双击/并发触发两轮 LLM） | 修复正在执行中，请稍候 |
 | 2 | 按 traceId 查最新分析记录 | 未找到告警分析结果 / 业务库不可用提示 |
-| 3 | `fix_status` 已完结校验：FIXED / NOT_NEEDED / HANDOVER / MANUAL_PENDING **永久防重** | 该告警已成功修复/已忽略（判定无需处理）/已转人工，请勿重复点击 |
+| 3 | `fix_status` 已完结校验：FIXED / NOT_NEEDED / HANDOVER / MANUAL_PENDING / MANUAL_RESOLVED **永久防重** | 该告警已成功修复/已忽略（判定无需处理）/已转人工/已由人工解决，请勿重复点击 |
 | 4 | 同服务串行锁 15min（value=持有者 traceId）：fix 分支按服务共用，并发修复必在提交环节分支竞争 | 该服务正在修复其他告警，请稍后再试 |
 
 **异步执行（`execute_fix()`）**：
@@ -175,19 +180,23 @@ NOT_A_PROBLEM→`NOT_NEEDED`、CODE→NULL（走自动修复按钮）。失败�
    提交信息自动加 `[AI] ` 前缀（人工 token 提交，GitLab author 无法区分 AI，靠前缀区分）。
    通道：**网关 POST /fix/commit**（网关本地独立 worktree 建分支+push，本服务无需直连 GitLab）
    → 失败降级 **GitLab API 直连**（POST branches 建分支[已存在复用] → PUT files 服务端落 commit）。
+   **撞分支自愈**：同日重试时远端已存在同名 fix 分支会 non-fast-forward 失败——提交器自动换
+   `_时分秒` 后缀的新分支名重试一次，实际分支名随 fix_summary 落库（看板合并状态优先读它）。
 
-5. **五态判定与落库**（效果看板统计口径）：
+5. **六态判定与落库**（效果看板统计口径）：
 
 | fix_status | 触发条件 | 语义 | 可否重试 |
 | --- | --- | --- | --- |
 | `FIXED` | commit 成功 | 已提交修复分支 | 否（永久防重） |
 | `NOT_NEEDED` | LLM 判 non_code，或人工忽略接口落库 | 确认无需任何处理，**正确结果不算失败，不计入失败数** | 否（永久防重） |
-| `MANUAL_PENDING` | LLM 判 manual，或分析归因 MANUAL_REQUIRED | 待人工处理（附操作步骤） | 否（永久防重） |
-| `HANDOVER` | 分析归因 DEPENDENCY | 已转人工排查（上下游依赖问题） | 否（永久防重） |
+| `MANUAL_PENDING` | LLM 判 manual，或分析归因 MANUAL_REQUIRED | 待人工处理（附操作步骤） | 否（永久防重，可结案） |
+| `HANDOVER` | 分析归因 DEPENDENCY | 已转人工排查（上下游依赖问题） | 否（永久防重，可结案） |
+| `MANUAL_RESOLVED` | 人工结案接口落库 | 人工已处理解决，**计入解决率分子** | 否（永久防重） |
 | `FAILED` | 生成/提交/执行异常 | 未修复 | **可重试** |
 | `NULL` | 未发起过修复 | — | 可发起 |
 
-   `fix_summary` 与 GitLab 提交记录一字不差：commit message 原文 + `commit: <shortId>` + `查看改动: <webUrl>`。
+   `fix_summary` 与 GitLab 提交记录一字不差：commit message 原文 + `分支: <实际分支名>` +
+   `commit: <shortId>` + `查看改动: <webUrl>`（+ `MR: <url>`）。
 
 6. **群发修复结果卡片**（模板 `analyse.fix_notify.card_template_id`，7 变量：
    fix_result/service/interface/trace_id/fix_time/fix_branch/fix_summary；模板未配置自动降级文本消息）；
@@ -201,6 +210,18 @@ NOT_A_PROBLEM→`NOT_NEEDED`、CODE→NULL（走自动修复按钮）。失败�
 日报计入「无需修复」不计失败）。已完结告警忽略/修复均被拒（按状态提示已忽略/已修复/已转人工）；
 **自动修复执行中（执行锁存在）拒绝忽略**，防忽略结果被修复覆盖。忽略按钮链接经
 `feishu.ignore_jump_url` 配置后以卡片变量 `ignor_url` 下发。
+
+**人工结案接口**：`GET /inner/feishu/alarm/callback/resolve?traceId=&note=`（本版新增，Java 版无）——
+人工按建议步骤处理完后回填终态 `fix_status=MANUAL_RESOLVED`（永久防重），统计口径**计入已解决**。
+待人工/已转人工/未发起/失败均可结案；真终态（已修复/已忽略/人工已解决）拒绝；
+修复执行中拒绝（防结案结果被修复覆盖）。结案按钮链接经 `feishu.resolve_jump_url` 配置后
+以卡片变量 `resolve_url` 下发（告警卡与人工处理通知卡均可引用）；看板详情弹窗同样可结案。
+修复/忽略/结案的全部受理与终态写入独立审计表 `alarm_operation_audit`（含来源 IP，尽力而为）。
+
+**转人工催办**：APScheduler 按 `analyse.fix_notify.stale_remind_cron`（默认每天 10:20 北京时间，
+空串关闭）扫描 超过 `stale_hours`（默认 48h）仍未处理的 待人工/已转人工 告警
+（等待起点 = `COALESCE(fix_time, create_time)`），聚合为一条文本提醒发 `stale_chat_ids`
+（空则回退默认告警群），引导处理完点「已解决」结案，避免统计长期挂起。
 
 ### 2.3 链路三：卡片交互回调
 
@@ -220,9 +241,10 @@ token 校验（配了 `feishu.callback_token` 才校验）→ 解析按钮 value
 失败降级规则洞察）。卡片「查看详情」按钮指向本接口、可被反复点击 → **每自然日仅放行一次推送**
 （Redis 按日期幂等，推送失败释放锁允许当日重试）。
 
-- **共用口径**（`app/reporting/stats.py`，日报/看板一致，勿改）：`修复成功率 = 成功 / (错误告警 − 无需处理 − 转人工 − 待人工 − 重复)`，
-  非自动修复项剔除出分母（重复剔除防刷屏告警稀释成功率）；分母为 0 且有告警记 100%、无告警记 0% 不展示；
-  本期无告警只展示「🔴 错误告警 0 条」；重复/复发按 `repeat_type` 单独计数。
+- **共用口径**（`app/reporting/stats.py`，日报/看板一致，勿改）：`解决率 = (AI 修复成功 + 人工已解决) / (错误告警 − 无需处理 − 转人工 − 待人工 − 重复)`，
+  非自动修复项剔除出分母（重复剔除防刷屏告警稀释成功率）；人工已解决（结案终态）计入分子、留在分母；
+  分母为 0 且有告警记 100%、无告警记 0% 不展示；
+  本期无告警只展示「🔴 错误告警 0 条」；重复/复发按 `repeat_type` 单独计数；日报次行含「🛠 人工解决」段（非零才展示）。
 - **推送**：`daily_report.chat_ids` 多群，卡片模板优先，未配置/模板不可见自动文本兜底；
   单群失败不阻断其他群。
 
@@ -249,6 +271,9 @@ token 校验（配了 `feishu.callback_token` 才校验）→ 解析按钮 value
 | 落库失败 | 卡片照发；该告警修复按钮不可用（日志 ERROR 提示） |
 | 飞书发送失败 | 入重发队列（≤3 次）；卡片模板不可见(200381)等持久错误重试也无效，看日志 |
 | Redis 未配置 | 锁/缓存退化进程内实现（**仅单实例可用**，多实例必须配） |
+| 执行池满（风暴场景） | `executor.overflow_policy=inline`（默认）退化调用线程执行不丢任务；`=reject` 接收接口快速拒绝并提示「队列已满，请稍后重推」（修复回调始终 inline 不丢） |
+| 服务 LLM 分析预算超限 | 当小时降级规则报告（卡片仍有分析内容，指标 `alarm_analyse_llm_budget_skipped_total` 可观测） |
+| LLM 预算计数存储故障 | 放行本次分析（保护闸故障不误杀正常分析） |
 
 ### 2.7 修复质量闸与 MR 合拢（生产加固）
 
@@ -279,12 +304,28 @@ token 校验（配了 `feishu.callback_token` 才校验）→ 解析按钮 value
   `feishu_send_total{kind,outcome}`（含失败重发）、
   `llm_call_seconds{channel=local|gateway,task=analyse|fix|selfcheck}`、
   `llm_call_total{channel,task,outcome}`、`llm_tokens_total{kind=prompt|completion}`（本地 LLM）、
-  `alarm_executor_inflight`（在途+排队积压）、`alarm_executor_reject_total`。
+  `alarm_executor_inflight`（在途+排队积压）、`alarm_executor_reject_total`、
+  `alarm_analyse_llm_budget_skipped_total`（服务级 LLM 预算触发降级数）。
   label 只用有限枚举值，traceId/service 不入 label。
 - **`GET /readyz`**：就绪探针，区别于浅探活 `/healthz`——检查业务库（`SELECT 1`）与 Redis
   连通性，任一配置了的组件不可用返回 503；未配置业务库记 not_configured 不阻断（分析/卡片仍可用）。
   LLM/外挂网关按设计允许运行期降级，不作为就绪条件。
 - `prometheus_client` 缺失时指标退化为 no-op、服务照常启动（正常部署由 requirements.txt 保证）。
+
+### 2.9 安全与合规
+
+- **操作审计**：修复/忽略/结案的受理与终态写入独立表 `alarm_operation_audit`
+  （动作/前后状态/结果/来源 IP/摘要，建表见 `sql/schema.sql`；与 Java 版共用的告警表零改动）。
+  尽力而为语义：未配业务库不落库、审计写失败只记日志不阻断主流程。
+  注意：修复/忽略/结案按钮是飞书卡片跳转链接（GET），链路上没有操作者身份，审计记录来源 IP 与动作；
+  如需精确到人，建议在接入层（网关/SSO 反代）追加身份头后自行扩展。
+- **样本数据脱敏**：`analyse.db.mask_sensitive=true`（默认开）时，查库采集的样本行中的
+  手机号（前 3 后 4）/18 位身份证（前 4 后 3）/邮箱（本地部分留前 2 位）先掩码再进
+  LLM 上下文与飞书卡片，降低敏感数据出库面，同时保留首尾几位供排障比对。
+- **看板鉴权告警**：`dashboard.enabled` 且未配置 Basic 认证时启动打 WARNING
+  （告警内容/样本数据对可达网络暴露）。
+- **LLM 数据出境**：堆栈/源码/样本数据会发送给所配 LLM 服务商（网关/本地 LLM），
+  合规评审时纳入考量；可通过关闭 `analyse.db.enabled`/`mask_sensitive` 收窄外发内容。
 
 ---
 
@@ -293,8 +334,9 @@ token 校验（配了 `feishu.callback_token` 才校验）→ 解析按钮 value
 ```
 AI-alarm_autoFix/
 ├── app/
-│   ├── main.py                  # 入口：create_app 工厂、lifespan（重发线程/日报调度/优雅停机）
+│   ├── main.py                  # 入口：create_app 工厂、lifespan（重发线程/日报与催办/保留期调度/优雅停机）
 │   ├── container.py             # 依赖装配（等价 Spring 容器，显式构造无注解魔法）
+│   ├── doctor.py                # 组件自检命令：python -m app.doctor（连通性/配置完整性体检）
 │   ├── config.py                # 配置模型(严格校验)+加载+env覆盖+key常量     ← AlarmAnalyseProperties
 │   ├── api/routes.py            # 4 个 HTTP 端点                              ← FeishuAlarmController / FeishuCardCallbackController
 │   ├── models/alarm.py          # camelCase 报文模型+落库行                    ← AlarmLogBO / AlarmAnalyseResult / entity
@@ -324,10 +366,10 @@ AI-alarm_autoFix/
 │   ├── storage/alarm_repository.py # 落库/按traceId查/更新修复结果/区间查询        ← IAlarmAnalyzeResultService
 │   └── core/                    # http(超时+重试退避) kv(锁/缓存/队列) executor(有界线程池) text(字节截断) errors(异常体系) logging
 ├── docs/agent-gateway-deploy.md # ⭐ 外挂 Agent 网关部署手册（协议契约/env/冒烟/9 条坑）
-├── sql/schema.sql               # alarm_analyze_result 建表 DDL（含旧表补列 ALTER）
+├── sql/schema.sql               # alarm_analyze_result + alarm_operation_audit 建表 DDL（含旧表补列 ALTER）
 ├── e2e/                         # test 环境端到端实测脚本（预检/告警报文/日报驱动）
 ├── config.example.yaml          # 全量配置模板（逐项注释）
-├── tests/                       # 133 个单元/冒烟测试
+├── tests/                       # 209 个单元/冒烟测试
 ├── requirements.txt / pytest.ini / Dockerfile / .gitignore
 └── config.yaml                  # 真实运行配置（gitignore，含凭证禁止提交）
 ```
@@ -358,12 +400,13 @@ mysql -h <host> -u <user> -p <db> < sql/schema.sql
 python -m app.main                     # 或 uvicorn app.main:create_app --factory --port 8800
 
 # 5) 冒烟
+python -m app.doctor                          # 组件自检（业务库/Redis/飞书/GitLab/网关/LLM 配置体检）
 curl http://127.0.0.1:8800/healthz
 curl -X POST http://127.0.0.1:8800/inner/feishu/alarm/receive \
   -H "Content-Type: application/json" -d @e2e/alarm_payload.json
 ```
 
-单元测试（不出网）：`python -m pytest -q` → 84 passed。
+单元测试（不出网）：`python -m pytest -q` → 209 passed。
 
 ---
 
@@ -382,6 +425,7 @@ curl -X POST http://127.0.0.1:8800/inner/feishu/alarm/receive \
 | `default_card_template_id` | 告警卡片模板（变量见 §7）；请求体 `templateId` 可覆盖 |
 | `jump_url` | 卡片「修复」按钮跳转前缀，指到本服务的 `/inner/feishu/alarm/callback/fix?traceId=` |
 | `ignore_jump_url` | 卡片「忽略」按钮跳转前缀（`/inner/feishu/alarm/callback/ignore?traceId=`）；配置后卡片输出 `ignor_url` 变量，空则不输出 |
+| `resolve_jump_url` | 卡片「已解决」（结案）按钮跳转前缀（`/inner/feishu/alarm/callback/resolve?traceId=`）；配置后告警卡与人工通知卡输出 `resolve_url` 变量，空则不输出 |
 | `callback_token` | 卡片交互回调校验 token（空则跳过校验） |
 | `inner_auth_token` | `/inner/*` 接口头鉴权（`xizhao_request_auth`），空则不校验 |
 | `env` | 展示在卡片上的环境标识（test/prod…） |
@@ -397,14 +441,17 @@ curl -X POST http://127.0.0.1:8800/inner/feishu/alarm/receive \
 | `llm` | `provider` | deepseek / openai / qwen / custom（baseUrl/model 缺省按注册表取默认） |
 | | `max_tokens` | **思考型模型注意**：思维链计入额度，修复链路要输出整文件，建议 ≥20000 |
 | | `max_retries` | 429/5xx/网络错误指数退避重试次数 |
+| | `hourly_budget_per_service` | 单服务每小时模型分析调用上限（网关+本地 LLM 合计，重复压卡不计）；超限当小时降级规则报告；0=不限制（默认），生产建议 10~30 |
 | `external` | `url` / `api_key` | Agent 网关地址与 Bearer token（部署见 docs/agent-gateway-deploy.md） |
 | | `workspace` / `workspaces` | 网关侧 git 工作区：默认名 + 服务名映射 |
 | | `code_read_enabled` / `fix_commit_enabled` | 读码/提交走网关的开关（失败均自动降级 GitLab 直连） |
 | `db` | `nacos.config_db` | Nacos 配置库连接（direct-db 模式，建议只读账号 robot） |
 | | `nacos.namespace` | 命名空间=test 环境（预检脚本可自动发现） |
 | | `datasources` / `service_datasources` | 静态数据源兜底（Nacos 解析不到时用） |
+| | `mask_sensitive` | 样本行敏感数据掩码（默认开）：手机号/身份证/邮箱部分打码后再进 LLM 与卡片 |
 | `fix_notify` | `card_template_id` | 修复结果卡片模板（7 变量）；空则文本兜底 |
-| | `manual_card_template_id` | 人工处理/转人工通知卡片模板（6 变量）；空则文本兜底 |
+| | `manual_card_template_id` | 人工处理/转人工通知卡片模板（6 变量，配 `resolve_jump_url` 后另带 `resolve_url`）；空则文本兜底 |
+| | `stale_hours` / `stale_remind_cron` / `stale_chat_ids` | 转人工催办：超时未处理的 待人工/已转人工 聚合群提醒（默认 48h、每天 10:20、回退默认群；cron 空串关闭） |
 | `repeat` | `window_hours` | 指纹重复/复发识别回溯窗口（小时），默认 24；0 或负数关闭 |
 | `daily_report` | `cron` | 分钟级 cron（北京时间），默认 `40 9 * * *` |
 | | `chat_ids` / `card_template_id` | 推送群列表 / 日报模板（变量 content）；模板不可见时自动文本兜底 |
@@ -426,7 +473,9 @@ curl -X POST http://127.0.0.1:8800/inner/feishu/alarm/receive \
 | --- | --- |
 | `storage.redis_url` | 空=进程内实现（仅单实例）；多实例部署**必须**配 |
 | `storage.database` | `alarm_analyze_result` 所在库（jdbc:mysql:// 或 mysql:// 前缀均可解析） |
-| `executor.workers` / `queue_size` | 分析/修复线程池（4/100，满则退化调用线程执行） |
+| `storage.retention_days` / `retention_cron` | 告警记录保留期（默认 0=不清理）；>0 时每天分批删除超期记录，**与 Java 版共用表时启用会连 Java 版数据一起删，共用期保持 0** |
+| `executor.workers` / `queue_size` | 分析/修复线程池（4/100） |
+| `executor.overflow_policy` | 池满策略：`inline`（默认，调用线程执行不丢任务）/ `reject`（接收接口快速拒绝，风暴场景推荐生产）；仅作用于告警接收，修复回调始终 inline |
 | `server.host` / `port` / `log_level` | 监听与日志级别 |
 
 ---
@@ -456,6 +505,8 @@ curl -X POST http://127.0.0.1:8800/inner/feishu/alarm/receive \
 ```
 
 响应 `{"code":0,"message":"success","data":true}` —— 受理即返回，分析异步执行。
+`executor.overflow_policy=reject` 且执行池满时返回 code=500 与「告警分析队列已满，请稍后重推」
+（默认 inline 保持 Java CallerRuns 语义不拒绝）。
 `businessKeys.uri` 兜底请求接口、`businessKeys.params` 兜底请求参数并用于查库样本行等值匹配。
 
 ### 6.2 GET /inner/feishu/alarm/callback/fix?traceId=xxx —— 触发自动修复
@@ -463,14 +514,21 @@ curl -X POST http://127.0.0.1:8800/inner/feishu/alarm/receive \
 受理失败（code=500）文案即原因：`修复正在执行中，请稍候` / `未找到告警分析结果` /
 `该告警已成功修复，请勿重复点击` / `该告警已忽略（判定无需处理），请勿重复点击` /
 `该告警已转人工排查（上下游依赖问题），请勿重复点击` / `该告警已转人工处理，请勿重复点击` /
-`该服务正在修复其他告警，请稍后再试`。
+`该告警已由人工处理解决，请勿重复点击` / `该服务正在修复其他告警，请稍后再试`。
 受理成功（code=0）仅代表任务已受理，**实际结果看修复通知卡片与落库 fix_status**。
 
 ### 6.3 GET /inner/feishu/alarm/callback/ignore?traceId=xxx —— 忽略告警
 
 人工判定无需修复时调用（卡片「忽略」按钮跳转，入参同修复回调）：落库
 `fix_status=NOT_NEEDED`（永久防重，再点修复/忽略提示已忽略/已修复）。修复执行中拒绝忽略；
-已完结（已修复/已忽略/已转人工/待人工）拒绝并按状态提示。
+已完结（已修复/已忽略/已转人工/待人工/人工已解决）拒绝并按状态提示。
+
+### 6.3.1 GET /inner/feishu/alarm/callback/resolve?traceId=xxx&note= —— 人工结案（本版新增）
+
+人工按建议步骤处理完后调用（卡片「已解决」按钮/看板详情，落库 `fix_status=MANUAL_RESOLVED`
+永久防重，**统计口径计入已解决**）。待人工/已转人工/未发起/失败均可结案；
+真终态（已修复/已忽略/人工已解决）拒绝并按状态提示；修复执行中拒绝（防覆盖）。
+`note` 可选处理说明，写入 fix_summary（`人工已处理：问题已解决（<note>）`）。
 
 ### 6.4 POST /feishu/alarm/callback —— 飞书卡片交互回调
 
@@ -504,7 +562,8 @@ LLM/外挂网关按设计允许运行期降级，不作为就绪条件。
 ![img.png](img.png)
 
 - **处理概览**：环形图各段悬浮高亮、中心联动显示该状态数量与占比；右侧四张核心大卡
-  （问题数、修复数、修复率窗口、修复率当日，口径与日报一致），下方一排细分状态小卡。
+  （问题数、修复数、修复率窗口、修复率当日，口径与日报一致），下方一排细分状态小卡
+  （未处理/修复失败/待人工/无需处理/人工已解决/平均解决时长 MTTR/已合并）。
 - **问题数趋势**：按日（固定近 30 天）/ 按周（近 12 周）切换，新增（蓝）/修复（绿）/
   重复（橙虚线）三指标，新增与修复带面积渐变；悬浮出竖向参考线与数值提示框。
 - **最新告警**：右上角速览，点任意一条直接打开详情弹窗。
@@ -518,6 +577,12 @@ LLM/外挂网关按设计允许运行期降级，不作为就绪条件。
 | `GET /api/dashboard/overview?days=14&service=&system=` | KPI（问题数/修复数/窗口与当日修复率/待处理分布）+ 状态环形图与归因/重复分布（含占比）+ 每日（近30天）新增/修复/重复三折线 + 按周（近12周）+ **服务问题点 TOP10** |
 | `GET /api/dashboard/alarms?page=&size=&days=&service=&status=&q=&system=` | 分页明细（页面默认每页 10 条、查近 30 天；FIXED 记录带合并状态徽标） |
 | `GET /api/dashboard/alarms/{id}` | 详情：完整分析内容 + 处理情况（fix_summary/合并状态/链接） |
+| `POST /api/dashboard/alarms/{id}/retry` | 发起自动修复（与卡片「修复」按钮同入口、同防重语义）；受理/拒绝文案在 message |
+| `POST /api/dashboard/alarms/{id}/ignore` | 忽略告警（人工判定无需处理，与卡片「忽略」按钮同入口） |
+| `POST /api/dashboard/alarms/{id}/resolve?note=` | 人工结案（MANUAL_RESOLVED 终态，计入已解决） |
+
+详情弹窗按状态出「重试修复（FAILED）/忽略/人工已解决」按钮，写接口与页面同走 Basic 鉴权；
+处理后自动刷新列表与总览。
 | `GET /api/dashboard/services?system=` | 服务名筛选项（可按系统分类过滤） |
 | `GET /api/dashboard/systems` | 系统分类列表；**库里存在 >1 个分类时前端显示「按系统切换」**，否则隐藏、仅按服务筛选（system_type 为空的历史数据兼容） |
 
@@ -530,8 +595,8 @@ LLM/外挂网关按设计允许运行期降级，不作为就绪条件。
 3. 两者都无法确认（GitLab 未配置/查询失败/记录缺 commit 信息）⇒ 显示「未知」，
    详情页附 fix_summary 里的 MR/改动链接兜底。
 
-**口径与日报一致（勿改出两套）**：解决率 = 已解决 / (总数 − 无需处理 − 转人工 − 待人工 − 重复)，
-复发（RECURRED）不算重复、保留在分母；分母非正时看板不展示该项。
+**口径与日报一致（勿改出两套）**：解决率 = (AI 修复 + 人工已解决) / (总数 − 无需处理 − 转人工 − 待人工 − 重复)，
+人工已解决计入分子、留在分母；复发（RECURRED）不算重复、保留在分母；分母非正时看板不展示该项。
 业务库未配置时 API 返回 code=500 与明确文案，页面本身仍可访问。
 合并扫描每轮最多查最近 50 条已修复记录（超出在 KPI 副标题标注），首屏后走缓存。
 
@@ -555,7 +620,7 @@ LLM/外挂网关按设计允许运行期降级，不作为就绪条件。
 | id / trace_id / service_name / `interface` / create_time / update_time | 基础字段（`interface` 是列名，SQL 中需反引号；trace_id VARCHAR(255) NOT NULL，create_time NOT NULL，update_time TIMESTAMP） |
 | analyze_content | **JSON 类型**，完整分析结果（键 camelCase，与 Java 互操作） |
 | system_type | 系统分类（如 `ccd`-归口系统；NULL=未分类）；看板「按系统切换」筛选项 |
-| fix_status | `FIXED` / `NOT_NEEDED` / `FAILED` / `HANDOVER` / `MANUAL_PENDING` / `NULL`(未发起) |
+| fix_status | `FIXED` / `NOT_NEEDED` / `FAILED` / `HANDOVER` / `MANUAL_PENDING` / `MANUAL_RESOLVED`(人工已解决) / `NULL`(未发起) |
 | fix_summary | commit message 原文+shortId+链接、人工操作步骤或忽略标记（应用层截 1000 字符） |
 | fix_time | 修复结果时间 |
 | problem_type | 归因：`CODE` / `DEPENDENCY` / `MANUAL_REQUIRED` / `NOT_A_PROBLEM` / `NULL`(未归因) |
@@ -568,12 +633,20 @@ LLM/外挂网关按设计允许运行期降级，不作为就绪条件。
 
 `analyze_content` JSON 字段：`service, env, systemType, level, title, coreMessage, exceptionClass, tables,
 codeContext, stackTrace, dbContext, analysis, proposal, traceId, time, rawMessage, requestUri,
-requestParam, url, problemType, fingerprint, repeatType, rootId`（空值省略）。
+requestParam, url, problemType, fingerprint, repeatType, rootId, recurredFixSummary`（空值省略；
+`recurredFixSummary` 仅复发告警携带，为原告警 fix_summary 摘要）。
 
 > 复用 Java 版旧表须先执行 `sql/schema.sql` 尾部注释里的归因四列 ALTER（2026-09-17 批次），
 > 否则指纹查询/落库会因缺列报错。
 
-### 7.2 Redis key（与 Java 版一致，可互通）
+### 7.2 表 `alarm_operation_audit`（操作审计，本版新增）
+
+修复/忽略/结案的受理与终态审计：`action`(fix/ignore/resolve/fix_result)、`trace_id`、
+`from_status`/`to_status`、`outcome`(accepted/rejected/终态)、`detail`、`source_ip`。
+与 Java 版共用的 `alarm_analyze_result` 零改动；审计为尽力而为（写失败只记日志）。
+建表见 `sql/schema.sql`（新部署执行 CREATE 即可，无需迁移）。
+
+### 7.3 Redis key（与 Java 版一致，可互通）
 
 见 §2.5 锁汇总表。另：飞书手机号→openId 缓存等 Java 版其他 key 本服务不使用。
 
@@ -581,7 +654,7 @@ requestParam, url, problemType, fingerprint, repeatType, rootId`（空值省略�
 
 ## 8. 测试与实测报告
 
-### 8.1 单元/冒烟测试（133 个，不出网）
+### 8.1 单元/冒烟测试（209 个，不出网）
 
 ```bash
 python -m pytest -q
@@ -589,8 +662,11 @@ python -m pytest -q
 
 覆盖：字节截断（含中文/emoji 边界）、SQL 表名提取、堆栈帧解析与类名转路径、异常类识别、
 修复 JSON 契约解析（snake/camel/代码块包裹/缺字段）、分支命名清洗、报告三段拆分与兜底、
-告警卡片变量与 28KB 预算削减、日报统计口径（成功率剔除 NOT_NEEDED）、配置加载与严格校验、
-JDBC/MySQL URL 解析、锁语义（互斥/持有者/队列）、接口契约（TestClient 全装配冒烟）。
+告警卡片变量与 28KB 预算削减、日报统计口径（解决率剔除 NOT_NEEDED、人工解决计入分子）、
+配置加载与严格校验、JDBC/MySQL URL 解析、锁语义（互斥/持有者/队列）、接口契约（TestClient 全装配冒烟）、
+人工结案状态机（MANUAL_RESOLVED 防重/复发联动）、转人工催办文案与发送、撞分支换名重试、
+服务级 LLM 预算闸与 kv 原子计数、执行池满 inline/reject 两策略、样本数据脱敏、操作审计尽力而为、
+看板处理操作接口、doctor 自检矩阵。
 
 ### 8.2 test 环境端到端实测（2026-09-17，真实环境全绿）
 
@@ -651,9 +727,11 @@ docker run -d --name ai-alarm -p 8800:8800 \
 端点协议契约、.env token 说明、Docker 部署、workspace 预置、GitLab webhook 注册、curl 冒烟清单、
 9 条历史踩坑（argv 100KB 限制 / compose 不换容器 / tzdata / 旧文档缺 /fix/commit 等）。
 
-**上线 checklist**：① 建表或确认旧表已有 fix 三列；② 飞书卡片模板对该应用开放可见（否则 200381）；
-③ `jump_url` 指到本服务可达地址；④ `default_branch` 与环境分支一致；⑤ 网关 api_key 两边一致；
-⑥ 推送方把 receive 地址切过来（报文无需改动）。
+**上线 checklist**：① 建表或确认旧表已有 fix 三列 + 审计表（`sql/schema.sql` 一次执行即可）；
+② 飞书卡片模板对该应用开放可见（否则 200381）；
+③ `jump_url` 指到本服务可达地址（建议同时配 `resolve_jump_url` 结案按钮）；
+④ `default_branch` 与环境分支一致；⑤ 网关 api_key 两边一致；
+⑥ 推送方把 receive 地址切过来（报文无需改动）；⑦ 跑一遍 `python -m app.doctor` 全绿再切流。
 
 ---
 
@@ -679,7 +757,7 @@ docker run -d --name ai-alarm -p 8800:8800 \
 | 3 | 出站 HTTP 统一超时 + 429/5xx 指数退避重试；日志不落 header/body |
 | 4 | **LLM 空 content 报错带 finish_reason 与响应体摘要**（修复 Java 版排障信息丢失缺陷） |
 | 5 | 业务库不可用时修复接口友好降级（明确文案）而非 500 |
-| 6 | 133 个单测 + test 环境真实验证，核心语义全部有测试锁定 |
+| 6 | 209 个单测 + test 环境真实验证，核心语义全部有测试锁定 |
 
 **有意的行为差异**
 
@@ -700,8 +778,9 @@ docker run -d --name ai-alarm -p 8800:8800 \
   （否则 200381 template is not visible）。本版已内置 url 对象包装。
 - **LLM 返回空 content**：多为思考型模型 `max_tokens` 被思维链耗尽（调大到 20000+）。
   本版报错自带 finish_reason，可直接确认是 `length` 截断还是限流。
-- **修复一直 FAILED 且日志见 non-fast-forward**：同服务同日重复修复撞已 push 的 fix 分支（遗留已知
-  问题，根治需网关改基于已存在分支提交，见网关文档 §7）。临时处理：删远端 `fix_bug_yyyyMMdd_*` 分支或等次日。
+- **修复一直 FAILED 且日志见 non-fast-forward**：同服务同日重复修复撞已 push 的 fix 分支。
+  本版已内置自愈：提交器自动换 `_时分秒` 后缀新分支重试一次（实际分支名落 fix_summary），
+  一般不会再因此失败；若仍复现，多为网关侧 workspace 异常（见网关文档 §7）。
 - **日志里 GitLab 401 invalid_token**：直连兜底通道的 token 过期。网关通道正常则不影响功能，
   但建议更新 token（Java 版共用同一配置）。
 - **告警里写了表名但没查库**：先看日志——「未提取到表名」多是库名带连字符（正则不含 `-`，Java 版

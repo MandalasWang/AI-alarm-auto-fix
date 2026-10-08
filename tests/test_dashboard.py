@@ -53,14 +53,15 @@ def test_window_start_covers_today():
 
 def test_resolve_rate_excludes_not_needed():
     assert resolve_rate(total=54, fixed=8, not_needed=19) == 22.9
-    assert resolve_rate(total=0, fixed=0, not_needed=0) is None
-    assert resolve_rate(total=5, fixed=0, not_needed=5) is None  # 分母非正不展示
+    assert resolve_rate(total=0, fixed=0, not_needed=0) is None  # 无告警不展示
+    assert resolve_rate(total=5, fixed=0, not_needed=5) == 100.0  # 有告警但无可自动修复项，记 100（与日报一致）
 
 
 def test_resolve_rate_matches_daily_report_formula():
     # 口径与日报一致：成功 / (总数 − 无需处理 − 转人工 − 待人工 − 重复)
     assert resolve_rate(total=10, fixed=3, not_needed=2, manual=2, repeated=2) == 75.0
-    assert resolve_rate(total=3, fixed=1, not_needed=1, manual=0, repeated=2) is None  # 分母 3−1−2=0
+    assert resolve_rate(total=3, fixed=1, not_needed=1, manual=0, repeated=2) == 100.0  # 分母 3−1−2=0 且有告警，记 100
+    assert resolve_rate(total=5, fixed=0, not_needed=0, manual=5) == 100.0  # 全部转人工/待人工 → 分母 0，零失败记 100
 
 
 def test_build_daily_series_zero_filled():

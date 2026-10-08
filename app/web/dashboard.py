@@ -107,14 +107,15 @@ def window_start(days: int, now: datetime | None = None) -> datetime:
 
 def resolve_rate(total: int, fixed: int, not_needed: int,
                  manual: int = 0, repeated: int = 0, manual_resolved: int = 0) -> float | None:
-    """解决率口径与日报一致：(AI修复+人工解决) / (告警总数 − 无需处理 − 转人工 − 待人工 − 重复)。
+    """解决率口径与日报一致（app/reporting/stats.py）：(AI修复+人工解决) / (告警总数 − 无需处理 − 转人工 − 待人工 − 重复)。
 
     人工已解决（MANUAL_RESOLVED）是真实解决，计入分子、留在分母；
-    重复只剔除 REPEATED（复发 RECURRED 是新问题，保留在分母）；分母非正返回 None（不展示）。
+    重复只剔除 REPEATED（复发 RECURRED 是新问题，保留在分母）；
+    分母为 0 且有告警记 100%（无可自动修复项、零失败，记 0 会误读为全部修复失败），无告警返回 None（不展示）。
     """
     denominator = total - not_needed - manual - repeated
     if denominator <= 0:
-        return None
+        return 100.0 if total > 0 else None
     return round((fixed + manual_resolved) / denominator * 100, 1)
 
 
